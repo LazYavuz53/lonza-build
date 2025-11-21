@@ -167,7 +167,7 @@ def get_pipeline(
     )
     input_data = ParameterString(
         name="InputDataUrl",
-        default_value="s3://instadeep53/datasets/",
+        default_value="s3://instadeep53/datasets/clinical.csv",
     )
 
     # processing step for feature engineering
