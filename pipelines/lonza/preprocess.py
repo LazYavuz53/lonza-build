@@ -12,20 +12,20 @@ Clinical biomarker analysis script for SageMaker Processing.
 import argparse
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple, Iterable
 from urllib.parse import urlparse
 
 import boto3
 import subprocess
 import sys
+import os
 
 subprocess.check_call([
-    sys.executable, "-m", "pip", "install", 
+    sys.executable, "-m", "pip", "install",
     "matplotlib", "seaborn", "pandas"
 ])
 
 import matplotlib
-
 import matplotlib.pyplot as plt
 
 import pandas as pd
@@ -38,6 +38,62 @@ plt.rcParams["figure.dpi"] = 120
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
+
+
+def parse_s3_uri(s3_uri: str) -> Tuple[str, str]:
+    """Split an S3 URI into bucket and prefix components."""
+    if not s3_uri.startswith("s3://"):
+        raise ValueError(f"Expected S3 URI starting with 's3://', got: {s3_uri}")
+
+    path = s3_uri[5:]
+    if "/" not in path:
+        return path, ""
+    bucket, prefix = path.split("/", 1)
+    return bucket, prefix.rstrip("/")
+
+
+def download_s3_prefix(s3_uri: str, local_dir: str) -> None:
+    """Download the full contents of an S3 prefix into ``local_dir``."""
+    bucket, prefix = parse_s3_uri(s3_uri)
+    client = boto3.client("s3")
+    paginator = client.get_paginator("list_objects_v2")
+
+    logger.info("Downloading dataset from %s to %s", s3_uri, local_dir)
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            if key.endswith("/"):
+                continue
+            rel_path = os.path.relpath(key, prefix) if prefix else key
+            dest_path = os.path.join(local_dir, rel_path)
+            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+            logger.debug("Downloading s3://%s/%s -> %s", bucket, key, dest_path)
+            client.download_file(bucket, key, dest_path)
+
+
+def save_dataframe(df: pd.DataFrame, path: str) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    df.to_csv(path, index=False)
+    logger.info("Saved %s (%d rows)", path, len(df))
+
+
+def perform_split(train_df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    shuffled = train_df.sample(frac=1.0, random_state=42).reset_index(drop=True)
+    validation_size = max(1, int(0.1 * len(shuffled)))
+    validation = shuffled.iloc[:validation_size]
+    train = shuffled.iloc[validation_size:]
+    return train, validation
+
+
+def prepare_outputs(
+    train: pd.DataFrame,
+    validation: pd.DataFrame,
+    test: pd.DataFrame,
+    base_dir: str,
+) -> None:
+    save_dataframe(train, os.path.join(base_dir, "train", "train.csv"))
+    save_dataframe(validation, os.path.join(base_dir, "validation", "validation.csv"))
+    save_dataframe(test, os.path.join(base_dir, "test", "test.csv"))
 
 
 # =========================================================
@@ -378,7 +434,10 @@ def parse_args() -> argparse.Namespace:
         dest="plots_dir",
         type=str,
         default="/opt/ml/processing/output",
-        help="Directory where plots will be stored (default: /opt/ml/processing/output).",
+        help=(
+            "Directory where plots will be stored "
+            "(default: /opt/ml/processing/output)."
+        ),
     )
     return parser.parse_args()
 
@@ -416,7 +475,12 @@ def main() -> None:
     stats_df = differential_analysis_d2(analysis_df)
 
     # 6. Time-course plots → saved to output directory
-    plot_time_courses(analysis_df, stats_df, fdr_threshold=0.01, save_dir=save_plots_dir)
+    plot_time_courses(
+        analysis_df,
+        stats_df,
+        fdr_threshold=0.01,
+        save_dir=save_plots_dir,
+    )
 
 
 if __name__ == "__main__":
