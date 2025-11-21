@@ -1,410 +1,422 @@
 #!/usr/bin/env python
-"""
-Clinical biomarker analysis script for SageMaker Processing.
+"""Custom preprocessing script for the SageMaker pipeline.
 
-- Downloads clinical.csv from an S3 path
-- Basic descriptive stats
-- Missingness & QC
-- Change From Baseline (CFB) for biomarkers
-- Differential analysis at D2 (DRUG vs PLACEBO) with BH-FDR
-- Time-course plots for significant markers → saved to /opt/ml/processing/output/
+This module ports the data cleaning and visualisation workflow defined in
+``data_analysis/preprocessing.py`` so it can be executed inside a SageMaker
+Processing job.  The script expects peptide binding datasets stored in an S3
+prefix and produces:
+
+* cleaned train/validation/test CSV files
+* distribution plots saved as PNG images
+* a metadata JSON payload describing the processed corpus
+
+The Processing job copies every output directory declared in ``pipeline.py`` to
+Amazon S3, therefore the figures are automatically persisted when the step
+completes.
 """
+
+from __future__ import annotations
+
 import argparse
+import json
 import logging
-from pathlib import Path
-from typing import Optional
-from urllib.parse import urlparse
+import os
+import pathlib
+import re
+from typing import Iterable, Tuple
 
 import boto3
+import subprocess
+import sys
+
+subprocess.check_call(
+    [sys.executable, "-m", "pip", "install", "matplotlib", "seaborn", "pandas"]
+)
+
+import matplotlib
 import matplotlib.pyplot as plt
-import numpy as np
 import pandas as pd
-from scipy.stats import ttest_ind
+import seaborn as sns
 
-plt.rcParams["figure.figsize"] = (6, 4)
-plt.rcParams["figure.dpi"] = 120
+matplotlib.use("Agg")
 
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
-
-
-# =========================================================
-# Benjamini–Hochberg FDR
-# =========================================================
-def bh_fdr(pvals: np.ndarray) -> np.ndarray:
-    """
-    Benjamini–Hochberg FDR correction.
-    Returns q-values (same shape as pvals).
-    """
-    m = len(pvals)
-    order = np.argsort(pvals)
-    ranked_p = pvals[order]
-    q = np.empty(m, dtype=float)
-    prev_q = 1.0
-    # Iterate from largest p to smallest
-    for i in range(m - 1, -1, -1):
-        rank = i + 1
-        q_i = ranked_p[i] * m / rank
-        if q_i > prev_q:
-            q_i = prev_q
-        prev_q = q_i
-        q[i] = q_i
-    qvals = np.empty(m, dtype=float)
-    qvals[order] = q
-    return qvals
+LOGGER = logging.getLogger(__name__)
+LOGGER.setLevel(logging.INFO)
+LOGGER.addHandler(logging.StreamHandler())
 
 
-# =========================================================
-# Core analysis steps
-# =========================================================
-def load_data(csv_path: Path) -> pd.DataFrame:
-    df = pd.read_csv(csv_path)
+AA_VOCAB = list("ACDEFGHIKLMNPQRSTVWY")
+AA_SET = set(AA_VOCAB)
 
-    marker_cols = [c for c in df.columns if c.startswith("MARKER_")]
 
-    print("=== Basic Info ===")
-    print("Shape:", df.shape)
-    print("Number of biomarker columns:", len(marker_cols))
-    print("Example biomarker columns:", marker_cols[:5])
+def parse_s3_uri(s3_uri: str) -> Tuple[str, str]:
+    """Split an S3 URI into bucket and prefix components."""
+
+    if not s3_uri.startswith("s3://"):
+        raise ValueError(f"Expected S3 URI starting with 's3://', got: {s3_uri}")
+
+    path = s3_uri[5:]
+    if "/" not in path:
+        return path, ""
+    bucket, prefix = path.split("/", 1)
+    return bucket, prefix.rstrip("/")
+
+
+def download_s3_prefix(s3_uri: str, local_dir: str) -> None:
+    """Download the full contents of an S3 prefix into ``local_dir``."""
+
+    bucket, prefix = parse_s3_uri(s3_uri)
+    client = boto3.client("s3")
+    paginator = client.get_paginator("list_objects_v2")
+
+    LOGGER.info("Downloading dataset from %s to %s", s3_uri, local_dir)
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            if key.endswith("/"):
+                continue
+            rel_path = os.path.relpath(key, prefix) if prefix else key
+            dest_path = os.path.join(local_dir, rel_path)
+            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+            LOGGER.debug("Downloading s3://%s/%s -> %s", bucket, key, dest_path)
+            client.download_file(bucket, key, dest_path)
+
+
+def fix_allele_format(allele: str) -> str:
+    """Fix allele name to follow standard HLA format: HLA-A*02:101."""
+
+    allele = str(allele).strip().upper()
+    valid_pattern = re.compile(r"^HLA-[A-Z]\*\d{2}:\d{2,3}$")
+
+    if valid_pattern.match(allele):
+        return allele
+
+    allele = allele.replace(" ", "").replace("_", "").replace("--", "-")
+
+    if not allele.startswith("HLA"):
+        allele = "HLA-" + allele
+    elif not allele.startswith("HLA-"):
+        allele = allele.replace("HLA", "HLA-", 1)
+
+    if "*" not in allele:
+        allele = re.sub(r"^(HLA-[A-Z])(\d+)", r"\1*\2", allele)
+
+    allele = re.sub(r"(\*\d{2})(\d{2,3})$", r"\1:\2", allele)
+    return allele
+
+
+def clean_allele_column(df: pd.DataFrame, name: str) -> pd.DataFrame:
+    LOGGER.info("[%s] Checking and fixing allele formats", name)
+    valid_pattern = re.compile(r"^HLA-[A-Z]\*\d{2}:\d{2,3}$")
+    corrections_made = False
+    corrected_alleles = []
+
+    for allele in df["allele"]:
+        corrected = fix_allele_format(allele)
+        if corrected != allele:
+            corrections_made = True
+        corrected_alleles.append(corrected)
+
+    df["allele"] = corrected_alleles
+
+    invalid_mask = ~df["allele"].str.match(valid_pattern)
+    invalid_count = invalid_mask.sum()
+
+    if invalid_count > 0:
+        LOGGER.warning(
+            "[%s] %d allele entries remain invalid after correction.",
+            name,
+            invalid_count,
+        )
+    elif corrections_made:
+        LOGGER.info("[%s] All allele names corrected successfully.", name)
+    else:
+        LOGGER.info("[%s] No allele mismatches found.", name)
 
     return df
 
 
-def descriptive_stats(df: pd.DataFrame) -> None:
-    marker_cols = [c for c in df.columns if c.startswith("MARKER_")]
-
-    print("\n=== Descriptive statistics (full dataset) ===")
-
-    print("\nTREATMENT value counts:")
-    print(df["TREATMENT"].value_counts(dropna=False))
-
-    print("\nGENDER value counts:")
-    print(df["GENDER"].value_counts(dropna=False))
-
-    if "MARKER_TP53" in df.columns:
-        print("\nMARKER_TP53 summary (full dataset):")
-        print(df["MARKER_TP53"].describe())
-    else:
-        print("\nWARNING: MARKER_TP53 not found. Available markers example:")
-        print(marker_cols[:10])
+def load_csv_safe(path: str) -> pd.DataFrame:
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"File not found: {path}")
+    df = pd.read_csv(path)
+    expected_cols = {"peptide", "allele", "hit"}
+    missing = expected_cols - set(df.columns)
+    if missing:
+        raise ValueError(f"{path} missing columns: {missing}")
+    return df
 
 
-def qc_missingness(df: pd.DataFrame) -> pd.DataFrame:
-    marker_cols = [c for c in df.columns if c.startswith("MARKER_")]
+def dataset_stats(df: pd.DataFrame, name: str) -> None:
+    LOGGER.info(
+        "\n=== Dataset Stats: %s ===\nRows: %s\nColumns: %s\nUnique alleles: %s",
+        name,
+        f"{len(df):,}",
+        list(df.columns),
+        df["allele"].nunique(),
+    )
+    if "hit" in df.columns:
+        LOGGER.info("Label distribution (hit):\n%s", df["hit"].value_counts(dropna=False))
+    lens = df["peptide"].astype(str).str.len()
+    LOGGER.info("Peptide length stats:\n%s", lens.describe())
 
-    # Row-level QC flag: any marker missing => measurement invalid at that timepoint
+
+def remove_exact_duplicates(df: pd.DataFrame, name: str) -> pd.DataFrame:
+    before = len(df)
+    df2 = df.drop_duplicates()
+    LOGGER.info("[%s] Removed exact duplicate rows: %d", name, before - len(df2))
+    return df2
+
+
+def remove_conflicting_duplicates(df: pd.DataFrame, name: str) -> pd.DataFrame:
+    grp = df.groupby(["peptide", "allele"])["hit"].nunique()
+    conflicts = grp[grp > 1]
+    if conflicts.empty:
+        LOGGER.info("[%s] Conflicting duplicates: none", name)
+        return df
+    before = len(df)
+    bad_keys = set(conflicts.index)
+    mask = df.set_index(["peptide", "allele"]).index.isin(bad_keys)
+    df2 = df[~mask].copy()
+    LOGGER.info(
+        "[%s] Conflicting (peptide, allele) pairs: %d | Rows removed: %d",
+        name,
+        len(conflicts),
+        before - len(df2),
+    )
+    return df2
+
+
+def handle_missing(df: pd.DataFrame, name: str) -> pd.DataFrame:
+    miss = df.isna().sum()
+    if miss.sum() == 0:
+        LOGGER.info("[%s] Missing values: none", name)
+        return df
+    LOGGER.info("[%s] Missing values per column:\n%s", name, miss)
+    before = len(df)
+    df2 = df.dropna(subset=["peptide", "allele", "hit"]).copy()
+    LOGGER.info(
+        "[%s] Rows dropped due to missing peptide/allele/hit: %d",
+        name,
+        before - len(df2),
+    )
+    return df2
+
+
+def is_valid_peptide(seq: str) -> bool:
+    s = str(seq).strip().upper()
+    if len(s) == 0:
+        return False
+    return set(s).issubset(AA_SET)
+
+
+def clean_invalid_peptides(df: pd.DataFrame, name: str) -> pd.DataFrame:
+    lens_before = df["peptide"].astype(str).str.len().describe()
+    valid_mask = df["peptide"].astype(str).str.upper().apply(is_valid_peptide)
+    invalid = (~valid_mask).sum()
+    df2 = df[valid_mask].copy()
+    LOGGER.info("[%s] Non-standard/invalid peptide rows removed: %d", name, invalid)
+    LOGGER.debug(
+        "[%s] Sequence length stats BEFORE removal:\n%s", name, lens_before
+    )
+    LOGGER.debug(
+        "[%s] Sequence length stats AFTER removal:\n%s",
+        name,
+        df2["peptide"].astype(str).str.len().describe(),
+    )
+    return df2
+
+
+def filter_test_alleles_in_train(train: pd.DataFrame, test: pd.DataFrame) -> pd.DataFrame:
+    train_alleles = set(train["allele"].unique())
+    test_alleles = set(test["allele"].unique())
+    unknown = sorted(list(test_alleles - train_alleles))
+    if unknown:
+        before = len(test)
+        test2 = test[test["allele"].isin(train_alleles)].copy()
+        LOGGER.warning(
+            "[TEST] Alleles not present in TRAIN: %s", unknown,
+        )
+        LOGGER.info(
+            "[TEST] Removed rows with unknown alleles: %d",
+            before - len(test2),
+        )
+        return test2
+    LOGGER.info("[TEST] All test alleles exist in training")
+    return test
+
+
+def compute_max_len(train_df: pd.DataFrame) -> int:
+    max_len = int(train_df["peptide"].astype(str).str.len().max())
+    LOGGER.info("[FE] Max sequence length (from CLEANED TRAIN): %d", max_len)
+    return max_len
+
+
+def plot_class_distribution(df: pd.DataFrame, out_prefix: str, out_dir: str) -> None:
+    plt.figure(figsize=(4, 4))
+    sns.countplot(x="hit", data=df)
+    plt.title("General Class Distribution (hit)")
+    plt.xlabel("Class (hit)")
+    plt.ylabel("Count")
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, f"{out_prefix}_class_distribution.png"))
+    plt.close()
+
+    plt.figure(figsize=(12, 6))
+    allele_counts = (
+        df.groupby(["allele", "hit"]).size().reset_index(name="count")
+    )
+    top_alleles = df["allele"].value_counts().head(15).index
+    sns.barplot(
+        x="allele",
+        y="count",
+        hue="hit",
+        data=allele_counts[allele_counts["allele"].isin(top_alleles)],
+    )
+    plt.title("Class Distribution per Allele (top 15)")
+    plt.xticks(rotation=45, ha="right")
+    plt.tight_layout()
+    plt.savefig(
+        os.path.join(out_dir, f"{out_prefix}_class_distribution_per_allele.png")
+    )
+    plt.close()
+
+
+def plot_length_distribution(df: pd.DataFrame, out_prefix: str, out_dir: str) -> None:
     df = df.copy()
-    df["ROW_HAS_MISSING_MARKER"] = df[marker_cols].isna().any(axis=1)
+    df["length"] = df["peptide"].astype(str).str.len()
 
-    print("\n=== Missingness summary ===")
-    print("Total rows:", len(df))
-    print("Rows with any missing biomarker:", df["ROW_HAS_MISSING_MARKER"].sum())
+    plt.figure(figsize=(5, 4))
+    sns.histplot(df["length"], bins=20, kde=True, color="steelblue")
+    plt.title("General Peptide Length Distribution")
+    plt.xlabel("Peptide length")
+    plt.ylabel("Count")
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, f"{out_prefix}_length_distribution.png"))
+    plt.close()
 
-    print("\nMissingness by TREATMENT:")
-    print(
-        df.groupby("TREATMENT")["ROW_HAS_MISSING_MARKER"]
-        .agg(["count", "sum", "mean"])
-        .rename(
-            columns={
-                "count": "rows",
-                "sum": "rows_with_missing",
-                "mean": "frac_with_missing",
-            }
+    top_alleles = df["allele"].value_counts().head(15).index
+    plt.figure(figsize=(12, 6))
+    sns.boxplot(
+        x="allele",
+        y="length",
+        data=df[df["allele"].isin(top_alleles)],
+        showfliers=False,
+    )
+    plt.title("Peptide Length Distribution per Allele (top 15)")
+    plt.xticks(rotation=45, ha="right")
+    plt.tight_layout()
+    plt.savefig(
+        os.path.join(out_dir, f"{out_prefix}_length_distribution_per_allele.png")
+    )
+    plt.close()
+
+
+def save_dataframe(df: pd.DataFrame, path: str) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    df.to_csv(path, index=False)
+    LOGGER.info("Saved %s (%d rows)", path, len(df))
+
+
+def perform_split(train_df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    shuffled = train_df.sample(frac=1.0, random_state=42).reset_index(drop=True)
+    validation_size = max(1, int(0.1 * len(shuffled)))
+    validation = shuffled.iloc[:validation_size]
+    train = shuffled.iloc[validation_size:]
+    return train, validation
+
+
+def prepare_outputs(train: pd.DataFrame, validation: pd.DataFrame, test: pd.DataFrame,
+                    base_dir: str) -> None:
+    save_dataframe(train, os.path.join(base_dir, "train", "train.csv"))
+    save_dataframe(
+        validation, os.path.join(base_dir, "validation", "validation.csv")
+    )
+    save_dataframe(test, os.path.join(base_dir, "test", "test.csv"))
+
+
+def main(args: Iterable[str] | None = None) -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input-data", type=str, required=True)
+    parsed = parser.parse_args(args=args)
+
+    base_dir = "/opt/ml/processing"
+    raw_dir = os.path.join(base_dir, "raw")
+    dataset_dir = os.path.join(raw_dir, "datasets")
+    figures_dir = os.path.join(base_dir, "figures")
+    metadata_dir = os.path.join(base_dir, "metadata")
+
+    pathlib.Path(dataset_dir).mkdir(parents=True, exist_ok=True)
+    pathlib.Path(figures_dir).mkdir(parents=True, exist_ok=True)
+    pathlib.Path(metadata_dir).mkdir(parents=True, exist_ok=True)
+
+    download_s3_prefix(parsed.input_data, dataset_dir)
+
+    train_parts = []
+    for fold in sorted(pathlib.Path(dataset_dir).glob("fold_*.csv")):
+        df = load_csv_safe(str(fold))
+        df["peptide"] = df["peptide"].astype(str).str.upper().str.strip()
+        df["allele"] = df["allele"].astype(str).str.strip()
+        df = clean_allele_column(df, f"TRAIN file {fold.name}")
+        train_parts.append(df)
+
+    if not train_parts:
+        raise RuntimeError(
+            "No training folds found in the provided dataset. Expected files matching 'fold_*.csv'."
         )
-    )
 
-    print("\nMissingness by GENDER:")
-    print(
-        df.groupby("GENDER")["ROW_HAS_MISSING_MARKER"]
-        .agg(["count", "sum", "mean"])
-        .rename(
-            columns={
-                "count": "rows",
-                "sum": "rows_with_missing",
-                "mean": "frac_with_missing",
-            }
-        )
-    )
+    train_raw = pd.concat(train_parts, ignore_index=True)
 
-    # Analysis dataset: drop rows with missing marker
-    analysis_df = df[~df["ROW_HAS_MISSING_MARKER"]].copy()
+    test_path = pathlib.Path(dataset_dir) / "test.csv"
+    test_raw = load_csv_safe(str(test_path))
+    test_raw["peptide"] = test_raw["peptide"].astype(str).str.upper().str.strip()
+    test_raw["allele"] = test_raw["allele"].astype(str).str.strip()
+    test_raw = clean_allele_column(test_raw, "TEST")
 
-    print("\n=== Analysis dataset size ===")
-    print("Rows in analysis dataset:", len(analysis_df))
+    dataset_stats(train_raw, "TRAIN (raw)")
+    dataset_stats(test_raw, "TEST (raw)")
 
-    print("\nTREATMENT (analysis dataset):")
-    print(analysis_df["TREATMENT"].value_counts(dropna=False))
+    train_clean = remove_exact_duplicates(train_raw, "TRAIN")
+    test_clean = remove_exact_duplicates(test_raw, "TEST")
 
-    print("\nGENDER (analysis dataset):")
-    print(analysis_df["GENDER"].value_counts(dropna=False))
+    train_clean = remove_conflicting_duplicates(train_clean, "TRAIN")
+    if "hit" in test_clean.columns:
+        test_clean = remove_conflicting_duplicates(test_clean, "TEST")
 
-    if "MARKER_TP53" in analysis_df.columns:
-        print("\nMARKER_TP53 (analysis dataset):")
-        print(analysis_df["MARKER_TP53"].describe())
+    train_clean = handle_missing(train_clean, "TRAIN")
+    test_clean = handle_missing(test_clean, "TEST")
 
-    return analysis_df
+    train_clean = clean_invalid_peptides(train_clean, "TRAIN")
+    test_clean = clean_invalid_peptides(test_clean, "TEST")
 
+    test_clean = filter_test_alleles_in_train(train_clean, test_clean)
 
-def compute_cfb(analysis_df: pd.DataFrame) -> pd.DataFrame:
-    """Compute Change From Baseline (D0) for each biomarker at D1, D2."""
-    marker_cols = [c for c in analysis_df.columns if c.startswith("MARKER_")]
+    dataset_stats(train_clean, "TRAIN (cleaned)")
+    dataset_stats(test_clean, "TEST (cleaned)")
 
-    pivot = analysis_df.pivot_table(
-        index="USUBJID",
-        columns="VISIT",
-        values=marker_cols,
-    )
+    LOGGER.info("Generating distribution plots")
+    plot_class_distribution(train_clean, out_prefix="train", out_dir=figures_dir)
+    plot_length_distribution(train_clean, out_prefix="train", out_dir=figures_dir)
 
-    # Collect all new CFB columns in a list for concat
-    cfb_frames = []
+    max_seq_len = compute_max_len(train_clean)
 
-    for m in marker_cols:
-        if "D0" not in pivot[m]:
-            continue
-        baseline = pivot[m]["D0"]
+    clean_dir = os.path.join(base_dir, "clean")
+    pathlib.Path(clean_dir).mkdir(parents=True, exist_ok=True)
+    save_dataframe(train_clean, os.path.join(clean_dir, "train_clean.csv"))
+    save_dataframe(test_clean, os.path.join(clean_dir, "test_clean.csv"))
 
-        for visit in ["D1", "D2"]:
-            if visit in pivot[m]:
-                cfb_series = pivot[m][visit] - baseline
-                cfb_series.name = (m + "_CFB", visit)
-                cfb_frames.append(cfb_series)
+    metadata = {
+        "aa_vocab": AA_VOCAB,
+        "max_seq_len": max_seq_len,
+        "train_alleles": sorted(train_clean["allele"].unique()),
+    }
+    metadata_path = os.path.join(metadata_dir, "metadata.json")
+    with open(metadata_path, "w", encoding="utf-8") as handle:
+        json.dump(metadata, handle, indent=2)
+    LOGGER.info("Saved metadata to %s", metadata_path)
 
-    if not cfb_frames:
-        print("\nWARNING: No CFB columns could be computed (missing D0/D1/D2).")
-        sub_meta = analysis_df[["USUBJID", "TREATMENT", "GENDER"]].drop_duplicates()
-        return sub_meta
-
-    # Concatenate all at once → avoids fragmentation
-    cfb_wide = pd.concat(cfb_frames, axis=1)
-
-    # Flatten multiindex columns
-    cfb_wide.columns = [f"{col[0]}_{col[1]}" for col in cfb_wide.columns]
-
-    # Merge with subject metadata
-    sub_meta = analysis_df[["USUBJID", "TREATMENT", "GENDER"]].drop_duplicates()
-    cfb_df = sub_meta.merge(cfb_wide, on="USUBJID", how="left")
-
-    return cfb_df
-
-
-def differential_analysis_d2(analysis_df: pd.DataFrame) -> pd.DataFrame:
-    """D2 differential analysis (DRUG vs PLACEBO) with BH-FDR."""
-    marker_cols = [c for c in analysis_df.columns if c.startswith("MARKER_")]
-
-    d2 = analysis_df[analysis_df["VISIT"] == "D2"].copy()
-
-    print("\n=== D2 subset info (analysis dataset) ===")
-    print("D2 rows:", len(d2))
-    print("D2 TREATMENT counts:")
-    print(d2["TREATMENT"].value_counts())
-
-    drug_mask = d2["TREATMENT"] == "DRUG"
-    plac_mask = d2["TREATMENT"] == "PLACEBO"
-
-    pvals = []
-    marker_list = []
-
-    for m in marker_cols:
-        vals_drug = d2.loc[drug_mask, m].dropna()
-        vals_plac = d2.loc[plac_mask, m].dropna()
-        # Require a minimum size to avoid silly tests
-        if len(vals_drug) >= 3 and len(vals_plac) >= 3:
-            stat, p = ttest_ind(vals_drug, vals_plac, equal_var=False)
-            pvals.append(p)
-            marker_list.append(m)
-
-    if not pvals:
-        print("\nWARNING: No markers met minimum sample size for t-test.")
-        return pd.DataFrame(columns=["marker", "p_value", "q_value"])
-
-    pvals = np.array(pvals)
-    qvals = bh_fdr(pvals)
-
-    stats_df = pd.DataFrame(
-        {
-            "marker": marker_list,
-            "p_value": pvals,
-            "q_value": qvals,
-        }
-    ).sort_values("q_value")
-
-    print("\n=== Biomarker differential analysis at D2 ===")
-    print("Total markers tested:", len(stats_df))
-
-    print("\nTop 10 markers by q-value:")
-    print(stats_df.head(10))
-
-    # Significant markers at FDR <= 1%
-    sig_df = stats_df[stats_df["q_value"] <= 0.01].copy()
-    print("\nSignificant markers at FDR <= 1%:")
-    print(sig_df)
-
-    if len(sig_df) == 0:
-        print("\nNo markers passed FDR <= 1%. Using top 3 markers by q-value instead:")
-        print(stats_df.head(3)["marker"].tolist())
-
-    return stats_df
-
-
-def plot_time_courses(
-    analysis_df: pd.DataFrame,
-    stats_df: pd.DataFrame,
-    fdr_threshold: float = 0.01,
-    save_dir: Optional[Path] = None,
-) -> None:
-    """Time-course plots for significant (or top) markers."""
-    if stats_df.empty:
-        print("\nNo stats available to plot.")
-        return
-
-    # Decide which markers to plot
-    sig_df = stats_df[stats_df["q_value"] <= fdr_threshold].copy()
-    if len(sig_df) > 0:
-        sig_markers = sig_df["marker"].tolist()
-    else:
-        sig_markers = stats_df.head(3)["marker"].tolist()
-
-    # helper lookup dicts for p/q values
-    pval_lookup = dict(zip(stats_df["marker"], stats_df["p_value"]))
-
-    if save_dir is not None:
-        save_dir.mkdir(parents=True, exist_ok=True)
-
-    for m in sig_markers:
-        plt.figure()
-
-        # We'll use numeric x positions to make annotation easier
-        visits_order = ["D0", "D1", "D2"]
-        x_labels = [v for v in visits_order if v in analysis_df["VISIT"].unique()]
-        x = np.arange(len(x_labels))
-
-        for treatment in ["DRUG", "PLACEBO"]:
-            sub = analysis_df[analysis_df["TREATMENT"] == treatment]
-            means = sub.groupby("VISIT")[m].mean()
-
-            # guard in case some visits are missing
-            y_vals = [means.loc[v] if v in means.index else np.nan for v in x_labels]
-            plt.plot(x, y_vals, marker="o", label=treatment)
-
-        # axis labels/ticks
-        plt.xlabel("VISIT")
-        plt.ylabel(m)
-        plt.title(f"Mean {m} over time by TREATMENT")
-        plt.xticks(x, x_labels)
-        plt.legend()
-
-        # === Add p-value annotation at D2 if present ===
-        p = pval_lookup.get(m, None)
-
-        # Only show something if p <= 0.01
-        if p is not None and p <= 0.01:
-            ax = plt.gca()
-            ax.text(
-                0.65,
-                0.98,  # near top-right
-                "Significant (p ≤ 0.01)",
-                transform=ax.transAxes,
-                ha="left",
-                va="top",
-                fontsize=8,
-                fontweight="bold",
-                color="red",
-                bbox=dict(
-                    boxstyle="round,pad=0.1",
-                    fc="white",
-                    ec="black",
-                    alpha=0.8,
-                ),
-            )
-
-        plt.tight_layout()
-
-        if save_dir is not None:
-            out_path = save_dir / f"timecourse_{m}.png"
-            plt.savefig(out_path)
-            print(f"Saved plot for {m} to {out_path}")
-            plt.close()
-        else:
-            plt.show()
-
-
-# =========================================================
-# Utilities
-# =========================================================
-def download_from_s3(s3_uri: str, destination: Path) -> Path:
-    parsed = urlparse(s3_uri)
-    if parsed.scheme != "s3" or not parsed.netloc or not parsed.path:
-        raise ValueError(f"Invalid S3 URI: {s3_uri}")
-
-    bucket = parsed.netloc
-    key = parsed.path.lstrip("/")
-    destination.parent.mkdir(parents=True, exist_ok=True)
-
-    logger.info("Downloading data from bucket: %s, key: %s", bucket, key)
-    boto3.resource("s3").Bucket(bucket).download_file(key, str(destination))
-    return destination
-
-
-# =========================================================
-# Main
-# =========================================================
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Clinical biomarker analysis (QC, CFB, D2 diff, plots)."
-    )
-    parser.add_argument(
-        "--csv-path",
-        "--csv_path",
-        "--input-data",
-        dest="csv_path",
-        type=str,
-        required=True,
-        help="Local or S3 path to clinical.csv file.",
-    )
-    parser.add_argument(
-        "--plots-dir",
-        dest="plots_dir",
-        type=str,
-        default="/opt/ml/processing/output",
-        help="Directory where plots will be stored (default: /opt/ml/processing/output).",
-    )
-    return parser.parse_args()
-
-
-def main() -> None:
-    args = parse_args()
-
-    csv_arg = args.csv_path
-    plots_dir = Path(args.plots_dir)
-
-    if csv_arg.startswith("s3://"):
-        local_csv = Path("/opt/ml/processing/input/clinical.csv")
-        csv_path = download_from_s3(csv_arg, local_csv)
-    else:
-        csv_path = Path(csv_arg)
-
-    # Always use output directory for plots inside processing output
-    save_plots_dir = plots_dir
-
-    # 1. Load data
-    df = load_data(csv_path)
-
-    # 2. Descriptive stats
-    descriptive_stats(df)
-
-    # 3. Missingness & QC
-    analysis_df = qc_missingness(df)
-
-    # 4. Compute CFB
-    cfb_df = compute_cfb(analysis_df)
-    print("\n=== CFB dataframe shape ===")
-    print(cfb_df.shape)
-
-    # 5. Differential analysis at D2
-    stats_df = differential_analysis_d2(analysis_df)
-
-    # 6. Time-course plots → saved to output directory
-    plot_time_courses(analysis_df, stats_df, fdr_threshold=0.01, save_dir=save_plots_dir)
+    train_split, validation_split = perform_split(train_clean)
+    prepare_outputs(train_split, validation_split, test_clean, base_dir)
 
 
 if __name__ == "__main__":
