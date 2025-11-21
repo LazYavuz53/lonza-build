@@ -1,28 +1,83 @@
-"""SageMaker pipeline that runs the clinical biomarker preprocessing script."""
+"""Example workflow pipeline script for abalone pipeline.
+
+                                               . -ModelStep
+                                              .
+    Process-> Train -> Evaluate -> Condition .
+                                              .
+                                               . -(stop)
+
+Implements a get_pipeline(**kwargs) method.
+"""
+
 import os
 
 import boto3
 import sagemaker
 import sagemaker.session
-from sagemaker.processing import ProcessingOutput
+
+from sagemaker.inputs import TrainingInput
+from sagemaker.model_metrics import (
+    MetricsSource,
+    ModelMetrics,
+)
+from sagemaker.processing import (
+    ProcessingInput,
+    ProcessingOutput,
+    ScriptProcessor,
+)
+from sagemaker.sklearn.estimator import SKLearn
 from sagemaker.sklearn.processing import SKLearnProcessor
-from sagemaker.workflow.parameters import ParameterInteger, ParameterString
+from sagemaker.workflow.condition_step import (
+    ConditionStep,
+)
+from sagemaker.workflow.conditions import ConditionGreaterThanOrEqualTo
+from sagemaker.workflow.functions import (
+    JsonGet,
+)
+from sagemaker.workflow.parameters import (
+    ParameterInteger,
+    ParameterString,
+)
 from sagemaker.workflow.pipeline import Pipeline
+from sagemaker.workflow.properties import PropertyFile
+from sagemaker.workflow.steps import (
+    ProcessingStep,
+    TrainingStep,
+)
+from sagemaker.workflow.model_step import ModelStep
+from sagemaker.model import Model
 from sagemaker.workflow.pipeline_context import PipelineSession
-from sagemaker.workflow.steps import ProcessingStep
+
 
 BASE_DIR = os.path.dirname(os.path.realpath(__file__))
 
 
 def get_sagemaker_client(region):
-    """Gets the sagemaker client."""
+    """Gets the sagemaker client.
+
+    Args:
+        region: the aws region to start the session
+        default_bucket: the bucket to use for storing the artifacts
+
+    Returns:
+        `sagemaker.session.Session instance
+    """
     boto_session = boto3.Session(region_name=region)
     sagemaker_client = boto_session.client("sagemaker")
     return sagemaker_client
 
 
 def get_session(region, default_bucket):
-    """Gets the sagemaker session based on the region."""
+    """Gets the sagemaker session based on the region.
+
+    Args:
+        region: the aws region to start the session
+        default_bucket: the bucket to use for storing the artifacts
+
+    Returns:
+        `sagemaker.session.Session instance
+    """
+
     boto_session = boto3.Session(region_name=region)
 
     sagemaker_client = boto_session.client("sagemaker")
@@ -36,7 +91,16 @@ def get_session(region, default_bucket):
 
 
 def get_pipeline_session(region, default_bucket):
-    """Gets the pipeline session based on the region."""
+    """Gets the pipeline session based on the region.
+
+    Args:
+        region: the aws region to start the session
+        default_bucket: the bucket to use for storing the artifacts
+
+    Returns:
+        PipelineSession instance
+    """
+
     boto_session = boto3.Session(region_name=region)
     sagemaker_client = boto_session.client("sagemaker")
 
@@ -66,11 +130,22 @@ def get_pipeline(
     sagemaker_project_name=None,
     role=None,
     default_bucket=None,
-    pipeline_name="ClinicalBiomarkerPipeline",
-    base_job_prefix="ClinicalBiomarker",
+    model_package_group_name="InstaDeepMHCIPresentationModelPackageGroup",
+    pipeline_name="InstaDeepMHCIPresentationPipeline",
+    base_job_prefix="InstaDeepMHCIPresentation",
     processing_instance_type="ml.m5.xlarge",
+    training_instance_type="ml.m5.xlarge",
 ):
-    """Gets a SageMaker pipeline instance that runs the biomarker analysis preprocessing script."""
+    """Gets a SageMaker ML Pipeline instance working with on abalone data.
+
+    Args:
+        region: AWS region to create and run the pipeline.
+        role: IAM role to create and run steps and pipeline.
+        default_bucket: the bucket to use for storing the artifacts
+
+    Returns:
+        an instance of a pipeline
+    """
     sagemaker_session = get_session(region, default_bucket)
     if role is None:
         role = sagemaker.session.get_execution_role(sagemaker_session)
@@ -78,37 +153,203 @@ def get_pipeline(
     pipeline_session = get_pipeline_session(region, default_bucket)
 
     # parameters for pipeline execution
-    processing_instance_count = ParameterInteger(name="ProcessingInstanceCount", default_value=1)
+    processing_instance_count = ParameterInteger(
+        name="ProcessingInstanceCount", default_value=1
+    )
+    processing_instance_type_param = ParameterString(
+        name="ProcessingInstanceType", default_value=processing_instance_type
+    )
+    training_instance_type_param = ParameterString(
+        name="TrainingInstanceType", default_value=training_instance_type
+    )
+    model_approval_status = ParameterString(
+        name="ModelApprovalStatus", default_value="PendingManualApproval"
+    )
     input_data = ParameterString(
         name="InputDataUrl",
-        default_value="s3://instadeep53/datasets/clinical.csv",
+        default_value="s3://instadeep53/datasets/",
     )
 
+    # processing step for feature engineering
     sklearn_processor = SKLearnProcessor(
         framework_version="0.23-1",
-        instance_type=processing_instance_type,
+        instance_type=processing_instance_type_param,
         instance_count=processing_instance_count,
-        base_job_name=f"{base_job_prefix}/sklearn-biomarker-preprocess",
+        base_job_name=f"{base_job_prefix}/sklearn-InstaDeepMHCI-preprocess",
         sagemaker_session=pipeline_session,
         role=role,
     )
-
     step_args = sklearn_processor.run(
         outputs=[
-            ProcessingOutput(output_name="analysis", source="/opt/ml/processing/output"),
+            ProcessingOutput(output_name="train", source="/opt/ml/processing/train"),
+            ProcessingOutput(
+                output_name="validation", source="/opt/ml/processing/validation"
+            ),
+            ProcessingOutput(output_name="test", source="/opt/ml/processing/test"),
+            ProcessingOutput(output_name="figures", source="/opt/ml/processing/figures"),
+            ProcessingOutput(
+                output_name="metadata", source="/opt/ml/processing/metadata"
+            ),
+            ProcessingOutput(output_name="clean", source="/opt/ml/processing/clean"),
         ],
         code=os.path.join(BASE_DIR, "preprocess.py"),
-        arguments=["--csv-path", input_data, "--plots-dir", "/opt/ml/processing/output"],
+        arguments=["--input-data", input_data],
     )
     step_process = ProcessingStep(
-        name="PreprocessClinicalData",
+        name="PreprocessMHCIPresentationData",
         step_args=step_args,
     )
 
+    # training step for generating model artifacts
+    sklearn_train = SKLearn(
+        entry_point="train.py",
+        source_dir=BASE_DIR,
+        framework_version="1.2-1",
+        instance_type=training_instance_type_param,
+        instance_count=1,
+        base_job_name=f"{base_job_prefix}/sklearn-MHCIPresentation-train",
+        sagemaker_session=pipeline_session,
+        role=role,
+        hyperparameters={
+            "epochs": 10,
+            "chunk-size": 50_000,
+            "max-iter": 5,
+            "random-state": 53,
+        },
+    )
+    step_args = sklearn_train.fit(
+        inputs={
+            "clean": TrainingInput(
+                s3_data=step_process.properties.ProcessingOutputConfig.Outputs[
+                    "clean"
+                ].S3Output.S3Uri,
+                content_type="text/csv",
+            ),
+            "metadata": TrainingInput(
+                s3_data=step_process.properties.ProcessingOutputConfig.Outputs[
+                    "metadata"
+                ].S3Output.S3Uri,
+                content_type="application/json",
+            ),
+        },
+    )
+    step_train = TrainingStep(
+        name="TrainAlleleClassifiers",
+        step_args=step_args,
+    )
+
+    # processing step for evaluation
+    sklearn_image_uri = sklearn_train.training_image_uri()
+    script_eval = ScriptProcessor(
+        image_uri=sklearn_image_uri,
+        command=["python3"],
+        instance_type=processing_instance_type_param,
+        instance_count=1,
+        base_job_name=f"{base_job_prefix}/script-MHCIPresentation-eval",
+        sagemaker_session=pipeline_session,
+        role=role,
+    )
+    step_args = script_eval.run(
+        inputs=[
+            ProcessingInput(
+                source=step_train.properties.ModelArtifacts.S3ModelArtifacts,
+                destination="/opt/ml/processing/model",
+            ),
+            ProcessingInput(
+                source=step_process.properties.ProcessingOutputConfig.Outputs[
+                    "test"
+                ].S3Output.S3Uri,
+                destination="/opt/ml/processing/test",
+            ),
+            ProcessingInput(
+                source=step_process.properties.ProcessingOutputConfig.Outputs[
+                    "metadata"
+                ].S3Output.S3Uri,
+                destination="/opt/ml/processing/metadata",
+            ),
+            ProcessingInput(
+                source=step_process.properties.ProcessingOutputConfig.Outputs[
+                    "clean"
+                ].S3Output.S3Uri,
+                destination="/opt/ml/processing/clean",
+            ),
+        ],
+        outputs=[
+            ProcessingOutput(
+                output_name="evaluation", source="/opt/ml/processing/evaluation"
+            ),
+        ],
+        code=os.path.join(BASE_DIR, "evaluate.py"),
+    )
+    evaluation_report = PropertyFile(
+        name="MHCIPresentationEvaluationReport",
+        output_name="evaluation",
+        path="evaluation.json",
+    )
+    step_eval = ProcessingStep(
+        name="EvaluateMHCIPresentationModel",
+        step_args=step_args,
+        property_files=[evaluation_report],
+    )
+
+    # register model step that will be conditionally executed
+    model_metrics = ModelMetrics(
+        model_statistics=MetricsSource(
+            s3_uri="{}/evaluation.json".format(
+                step_eval.arguments["ProcessingOutputConfig"]["Outputs"][0]["S3Output"][
+                    "S3Uri"
+                ]
+            ),
+            content_type="application/json",
+        )
+    )
+    model = Model(
+        image_uri=sklearn_image_uri,
+        model_data=step_train.properties.ModelArtifacts.S3ModelArtifacts,
+        sagemaker_session=pipeline_session,
+        role=role,
+    )
+    step_args = model.register(
+        content_types=["application/json"],
+        response_types=["application/json"],
+        inference_instances=["ml.t2.medium", "ml.m5.large"],
+        transform_instances=["ml.m5.large"],
+        model_package_group_name=model_package_group_name,
+        approval_status=model_approval_status,
+        model_metrics=model_metrics,
+    )
+    step_register = ModelStep(
+        name="RegisterMHCIPresentationModel",
+        step_args=step_args,
+    )
+
+    # condition step for evaluating model quality and branching execution
+    cond_gte = ConditionGreaterThanOrEqualTo(
+        left=JsonGet(
+            step_name=step_eval.name,
+            property_file=evaluation_report,
+            json_path="classification_metrics.accuracy.value",
+        ),
+        right=0.5,
+    )
+    step_cond = ConditionStep(
+        name="CheckAccuracyEvaluation",
+        conditions=[cond_gte],
+        if_steps=[step_register],
+        else_steps=[],
+    )
+
+    # pipeline instance
     pipeline = Pipeline(
         name=pipeline_name,
-        parameters=[processing_instance_count, input_data],
-        steps=[step_process],
+        parameters=[
+            processing_instance_type_param,
+            processing_instance_count,
+            training_instance_type_param,
+            model_approval_status,
+            input_data,
+        ],
+        steps=[step_process, step_train, step_eval, step_cond],
         sagemaker_session=pipeline_session,
     )
     return pipeline
