@@ -16,9 +16,21 @@ from typing import Optional
 from urllib.parse import urlparse
 
 import boto3
+import subprocess
+import sys
+
+subprocess.check_call([
+    sys.executable, "-m", "pip", "install", 
+    "matplotlib", "seaborn", "pandas"
+])
+
+import matplotlib
+
 import matplotlib.pyplot as plt
-import numpy as np
+
 import pandas as pd
+import seaborn as sns
+import numpy as np
 from scipy.stats import ttest_ind
 
 plt.rcParams["figure.figsize"] = (6, 4)
