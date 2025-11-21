@@ -71,8 +71,8 @@ def download_s3_prefix(s3_uri: str, local_dir: str) -> None:
             client.download_file(bucket, key, dest_path)
 
 
-def save_dataframe(df: pd.DataFrame, path: str) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+def save_dataframe(df: pd.DataFrame, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(path, index=False)
     logger.info("Saved %s (%d rows)", path, len(df))
 
@@ -85,15 +85,63 @@ def perform_split(train_df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
     return train, validation
 
 
+def three_way_split(
+    df: pd.DataFrame, test_fraction: float = 0.2
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Split a dataframe into train/validation/test sets.
+
+    Validation size is 10% of the non-test portion (at least one row when possible).
+    """
+
+    if df.empty:
+        return df.copy(), df.copy(), df.copy()
+
+    shuffled = df.sample(frac=1.0, random_state=42).reset_index(drop=True)
+    test_size = max(1, int(test_fraction * len(shuffled)))
+    test = shuffled.iloc[:test_size]
+    remaining = shuffled.iloc[test_size:]
+
+    if remaining.empty:
+        return pd.DataFrame(columns=df.columns), pd.DataFrame(columns=df.columns), test
+
+    train, validation = perform_split(remaining)
+    return train, validation, test
+
+
 def prepare_outputs(
     train: pd.DataFrame,
     validation: pd.DataFrame,
     test: pd.DataFrame,
-    base_dir: str,
+    base_dir: Path,
+    cleaned_full: Optional[pd.DataFrame] = None,
 ) -> None:
-    save_dataframe(train, os.path.join(base_dir, "train", "train.csv"))
-    save_dataframe(validation, os.path.join(base_dir, "validation", "validation.csv"))
-    save_dataframe(test, os.path.join(base_dir, "test", "test.csv"))
+    output_dirs = {
+        "train": base_dir / "train",
+        "validation": base_dir / "validation",
+        "test": base_dir / "test",
+        "clean": base_dir / "clean",
+    }
+
+    for directory in output_dirs.values():
+        directory.mkdir(parents=True, exist_ok=True)
+
+    train_path = output_dirs["train"] / "train.csv"
+    validation_path = output_dirs["validation"] / "validation.csv"
+    test_path = output_dirs["test"] / "test.csv"
+
+    save_dataframe(train, train_path)
+    logger.info("Cleaned training split saved to %s", train_path)
+
+    save_dataframe(validation, validation_path)
+    logger.info("Cleaned validation split saved to %s", validation_path)
+
+    save_dataframe(test, test_path)
+    logger.info("Cleaned test split saved to %s", test_path)
+
+    if cleaned_full is not None:
+        clean_full_path = output_dirs["clean"] / "clean.csv"
+        save_dataframe(cleaned_full, clean_full_path)
+        logger.info("Full cleaned dataset saved to %s", clean_full_path)
 
 
 # =========================================================
@@ -447,9 +495,10 @@ def main() -> None:
 
     csv_arg = args.csv_path
     plots_dir = Path(args.plots_dir)
+    output_base_dir = Path("/opt/ml/processing")
 
     if csv_arg.startswith("s3://"):
-        local_csv = Path("/opt/ml/processing/input/clinical.csv")
+        local_csv = output_base_dir / "input" / "clinical.csv"
         csv_path = download_from_s3(csv_arg, local_csv)
     else:
         csv_path = Path(csv_arg)
@@ -470,6 +519,23 @@ def main() -> None:
     cfb_df = compute_cfb(analysis_df)
     print("\n=== CFB dataframe shape ===")
     print(cfb_df.shape)
+
+    # 4b. Split the cleaned dataset for downstream training
+    train_df, validation_df, test_df = three_way_split(cfb_df)
+    logger.info(
+        "Split cleaned dataset: %d train rows, %d validation rows, %d test rows",
+        len(train_df),
+        len(validation_df),
+        len(test_df),
+    )
+
+    prepare_outputs(
+        train=train_df,
+        validation=validation_df,
+        test=test_df,
+        base_dir=output_base_dir,
+        cleaned_full=cfb_df,
+    )
 
     # 5. Differential analysis at D2
     stats_df = differential_analysis_d2(analysis_df)
