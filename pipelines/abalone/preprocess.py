@@ -2,7 +2,7 @@
 import argparse
 import logging
 import os
-import pathlib
+from pathlib import Path
 import requests
 import tempfile
 
@@ -59,16 +59,17 @@ if __name__ == "__main__":
     parser.add_argument("--input-data", type=str, required=True)
     args = parser.parse_args()
 
-    base_dir = "/opt/ml/processing"
-    pathlib.Path(f"{base_dir}/data").mkdir(parents=True, exist_ok=True)
+    base_dir = Path("/opt/ml/processing")
+    data_dir = base_dir / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
     input_data = args.input_data
     bucket = input_data.split("/")[2]
     key = "/".join(input_data.split("/")[3:])
 
     logger.info("Downloading data from bucket: %s, key: %s", bucket, key)
-    fn = f"{base_dir}/data/abalone-dataset.csv"
+    fn = data_dir / "abalone-dataset.csv"
     s3 = boto3.resource("s3")
-    s3.Bucket(bucket).download_file(key, fn)
+    s3.Bucket(bucket).download_file(key, str(fn))
 
     logger.debug("Reading downloaded data.")
     df = pd.read_csv(
@@ -112,9 +113,23 @@ if __name__ == "__main__":
     np.random.shuffle(X)
     train, validation, test = np.split(X, [int(0.7 * len(X)), int(0.85 * len(X))])
 
-    logger.info("Writing out datasets to %s.", base_dir)
-    pd.DataFrame(train).to_csv(f"{base_dir}/train/train.csv", header=False, index=False)
-    pd.DataFrame(validation).to_csv(
-        f"{base_dir}/validation/validation.csv", header=False, index=False
-    )
-    pd.DataFrame(test).to_csv(f"{base_dir}/test/test.csv", header=False, index=False)
+    train_dir = base_dir / "train"
+    validation_dir = base_dir / "validation"
+    test_dir = base_dir / "test"
+
+    train_dir.mkdir(parents=True, exist_ok=True)
+    validation_dir.mkdir(parents=True, exist_ok=True)
+    test_dir.mkdir(parents=True, exist_ok=True)
+
+    train_path = train_dir / "train.csv"
+    validation_path = validation_dir / "validation.csv"
+    test_path = test_dir / "test.csv"
+
+    pd.DataFrame(train).to_csv(train_path, header=False, index=False)
+    logger.info("Saved cleaned train split to %s", train_path)
+
+    pd.DataFrame(validation).to_csv(validation_path, header=False, index=False)
+    logger.info("Saved cleaned validation split to %s", validation_path)
+
+    pd.DataFrame(test).to_csv(test_path, header=False, index=False)
+    logger.info("Saved cleaned test split to %s", test_path)
