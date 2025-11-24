@@ -188,9 +188,8 @@ def get_pipeline(
             ProcessingOutput(output_name="test", source="/opt/ml/processing/test"),
             ProcessingOutput(output_name="figures", source="/opt/ml/processing/figures"),
             ProcessingOutput(
-                output_name="metadata", source="/opt/ml/processing/metadata"
+                output_name="clean", source="/opt/ml/processing/clean"
             ),
-            ProcessingOutput(output_name="clean", source="/opt/ml/processing/clean"),
         ],
         code=os.path.join(BASE_DIR, "preprocess.py"),
         arguments=["--input-data", input_data],
@@ -225,9 +224,9 @@ def get_pipeline(
                 ].S3Output.S3Uri,
                 content_type="text/csv",
             ),
-            "metadata": TrainingInput(
+            "clean": TrainingInput(
                 s3_data=step_process.properties.ProcessingOutputConfig.Outputs[
-                    "metadata"
+                    "clean"
                 ].S3Output.S3Uri,
                 content_type="application/json",
             ),
@@ -263,9 +262,9 @@ def get_pipeline(
             ),
             ProcessingInput(
                 source=step_process.properties.ProcessingOutputConfig.Outputs[
-                    "metadata"
+                    "clean"
                 ].S3Output.S3Uri,
-                destination="/opt/ml/processing/metadata",
+                destination="/opt/ml/processing/clean",
             ),
             ProcessingInput(
                 source=step_process.properties.ProcessingOutputConfig.Outputs[
