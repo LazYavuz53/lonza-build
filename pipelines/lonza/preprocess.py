@@ -8,6 +8,7 @@ Clinical biomarker analysis script for SageMaker Processing.
 - Change From Baseline (CFB) for biomarkers
 - Differential analysis at D2 (DRUG vs PLACEBO) with BH-FDR
 - Time-course plots for significant markers → saved to /opt/ml/processing/output/
+- ML train/validation dataset built from D2, using significant biomarkers
 """
 import argparse
 import logging
@@ -20,9 +21,10 @@ import subprocess
 import sys
 import os
 
+# <<< NEW: install scikit-learn as well
 subprocess.check_call([
     sys.executable, "-m", "pip", "install",
-    "matplotlib", "seaborn", "pandas"
+    "matplotlib", "seaborn", "pandas", "scikit-learn"
 ])
 
 import matplotlib
@@ -32,6 +34,7 @@ import pandas as pd
 import seaborn as sns
 import numpy as np
 from scipy.stats import ttest_ind
+from sklearn.model_selection import train_test_split  # <<< NEW
 
 plt.rcParams["figure.figsize"] = (6, 4)
 plt.rcParams["figure.dpi"] = 120
@@ -71,8 +74,8 @@ def download_s3_prefix(s3_uri: str, local_dir: str) -> None:
             client.download_file(bucket, key, dest_path)
 
 
-def save_dataframe(df: pd.DataFrame, path: str) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+def save_dataframe(df: pd.DataFrame, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(path, index=False)
     logger.info("Saved %s (%d rows)", path, len(df))
 
@@ -85,15 +88,63 @@ def perform_split(train_df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
     return train, validation
 
 
+def three_way_split(
+    df: pd.DataFrame, test_fraction: float = 0.2
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Split a dataframe into train/validation/test sets.
+
+    Validation size is 10% of the non-test portion (at least one row when possible).
+    """
+
+    if df.empty:
+        return df.copy(), df.copy(), df.copy()
+
+    shuffled = df.sample(frac=1.0, random_state=42).reset_index(drop=True)
+    test_size = max(1, int(test_fraction * len(shuffled)))
+    test = shuffled.iloc[:test_size]
+    remaining = shuffled.iloc[test_size:]
+
+    if remaining.empty:
+        return pd.DataFrame(columns=df.columns), pd.DataFrame(columns=df.columns), test
+
+    train, validation = perform_split(remaining)
+    return train, validation, test
+
+
 def prepare_outputs(
     train: pd.DataFrame,
     validation: pd.DataFrame,
     test: pd.DataFrame,
-    base_dir: str,
+    base_dir: Path,
+    cleaned_full: Optional[pd.DataFrame] = None,
 ) -> None:
-    save_dataframe(train, os.path.join(base_dir, "train", "train.csv"))
-    save_dataframe(validation, os.path.join(base_dir, "validation", "validation.csv"))
-    save_dataframe(test, os.path.join(base_dir, "test", "test.csv"))
+    output_dirs = {
+        "train": base_dir / "train",
+        "validation": base_dir / "validation",
+        "test": base_dir / "test",
+        "clean": base_dir / "clean",
+    }
+
+    for directory in output_dirs.values():
+        directory.mkdir(parents=True, exist_ok=True)
+
+    train_path = output_dirs["train"] / "train.csv"
+    validation_path = output_dirs["validation"] / "validation.csv"
+    test_path = output_dirs["test"] / "test.csv"
+
+    save_dataframe(train, train_path)
+    logger.info("Cleaned training split saved to %s", train_path)
+
+    save_dataframe(validation, validation_path)
+    logger.info("Cleaned validation split saved to %s", validation_path)
+
+    save_dataframe(test, test_path)
+    logger.info("Cleaned test split saved to %s", test_path)
+
+    if cleaned_full is not None:
+        clean_full_path = output_dirs["clean"] / "clean.csv"
+        save_dataframe(cleaned_full, clean_full_path)
+        logger.info("Full cleaned dataset saved to %s", clean_full_path)
 
 
 # =========================================================
@@ -123,14 +174,111 @@ def bh_fdr(pvals: np.ndarray) -> np.ndarray:
 
 
 # =========================================================
+# Column validation and cleaning
+# =========================================================
+def validate_and_clean_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Validate required columns exist and clean column names.
+    """
+    # Strip whitespace from column names
+    df.columns = df.columns.str.strip()
+    
+    print("\n=== Column Validation ===")
+    print(f"Available columns: {df.columns.tolist()}")
+    
+    # Required columns mapping (case-insensitive check)
+    required_cols = {
+        'VISIT': ['VISIT', 'visit', 'Visit', 'AVISIT', 'AVISITN'],
+        'TREATMENT': ['TREATMENT', 'treatment', 'TRT', 'ARM', 'ARMCD'],
+        'USUBJID': ['USUBJID', 'usubjid', 'SUBJID', 'subject_id', 'SUBJECT'],
+        'GENDER': ['GENDER', 'gender', 'SEX', 'sex']
+    }
+    
+    # Try to find and standardize each required column
+    for std_name, variants in required_cols.items():
+        found = False
+        for variant in variants:
+            if variant in df.columns:
+                if variant != std_name:
+                    print(f"Renaming column '{variant}' to '{std_name}'")
+                    df = df.rename(columns={variant: std_name})
+                found = True
+                break
+        
+        if not found:
+            # Check for partial matches
+            partial_matches = [col for col in df.columns 
+                             if any(v.lower() in col.lower() for v in variants)]
+            if partial_matches:
+                raise ValueError(
+                    f"Could not find required column '{std_name}'. "
+                    f"Possible matches found: {partial_matches}. "
+                    f"Available columns: {df.columns.tolist()}"
+                )
+            else:
+                raise ValueError(
+                    f"Required column '{std_name}' not found. "
+                    f"Available columns: {df.columns.tolist()}"
+                )
+    
+    # Validate VISIT values
+    if 'VISIT' in df.columns:
+        unique_visits = df['VISIT'].unique()
+        print(f"\nUnique VISIT values: {unique_visits}")
+        
+        # Check if visits need standardization
+        visit_mapping = {}
+        for visit in unique_visits:
+            if pd.notna(visit):
+                visit_str = str(visit).strip().upper()
+                # Handle various formats: D0, Day 0, Day0, 0, etc.
+                if '0' in visit_str or 'BASELINE' in visit_str or 'BL' in visit_str:
+                    visit_mapping[visit] = 'D0'
+                elif '1' in visit_str:
+                    visit_mapping[visit] = 'D1'
+                elif '2' in visit_str:
+                    visit_mapping[visit] = 'D2'
+        
+        if visit_mapping:
+            print(f"Applying visit mapping: {visit_mapping}")
+            df['VISIT'] = df['VISIT'].map(lambda x: visit_mapping.get(x, x))
+            print(f"Standardized VISIT values: {df['VISIT'].unique()}")
+    
+    # Validate TREATMENT values
+    if 'TREATMENT' in df.columns:
+        unique_treatments = df['TREATMENT'].unique()
+        print(f"\nUnique TREATMENT values: {unique_treatments}")
+        
+        # Standardize treatment names
+        treatment_mapping = {}
+        for trt in unique_treatments:
+            if pd.notna(trt):
+                trt_str = str(trt).strip().upper()
+                if 'DRUG' in trt_str or 'ACTIVE' in trt_str or 'TRT' in trt_str:
+                    treatment_mapping[trt] = 'DRUG'
+                elif 'PLACEBO' in trt_str or 'PBO' in trt_str or 'CONTROL' in trt_str:
+                    treatment_mapping[trt] = 'PLACEBO'
+        
+        if treatment_mapping:
+            print(f"Applying treatment mapping: {treatment_mapping}")
+            df['TREATMENT'] = df['TREATMENT'].map(lambda x: treatment_mapping.get(x, x))
+            print(f"Standardized TREATMENT values: {df['TREATMENT'].unique()}")
+    
+    return df
+
+
+# =========================================================
 # Core analysis steps
 # =========================================================
 def load_data(csv_path: Path) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
+    
+    # Validate and clean columns first
+    df = validate_and_clean_columns(df)
 
     marker_cols = [c for c in df.columns if c.startswith("MARKER_")]
 
-    print("=== Basic Info ===")
+    print("\n=== Basic Info ===")
     print("Shape:", df.shape)
     print("Number of biomarker columns:", len(marker_cols))
     print("Example biomarker columns:", marker_cols[:5])
@@ -256,13 +404,32 @@ def compute_cfb(analysis_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def differential_analysis_d2(analysis_df: pd.DataFrame) -> pd.DataFrame:
-    """D2 differential analysis (DRUG vs PLACEBO) with BH-FDR."""
+    """
+    D2 differential analysis (DRUG vs PLACEBO) with BH-FDR.
+    
+    IMPORTANT: This function expects analysis_df in LONG format with VISIT column intact.
+    """
     marker_cols = [c for c in analysis_df.columns if c.startswith("MARKER_")]
 
+    # Verify VISIT column exists (should be in long format)
+    if "VISIT" not in analysis_df.columns:
+        raise ValueError(
+            f"VISIT column not found in analysis dataframe. "
+            f"This function requires long-format data with VISIT column. "
+            f"Available columns: {analysis_df.columns.tolist()}"
+        )
+
+    # Filter to D2 only
     d2 = analysis_df[analysis_df["VISIT"] == "D2"].copy()
 
     print("\n=== D2 subset info (analysis dataset) ===")
     print("D2 rows:", len(d2))
+    
+    if len(d2) == 0:
+        print("WARNING: No rows found for VISIT='D2'")
+        print(f"Available VISIT values: {analysis_df['VISIT'].unique()}")
+        return pd.DataFrame(columns=["marker", "p_value", "q_value"])
+    
     print("D2 TREATMENT counts:")
     print(d2["TREATMENT"].value_counts())
 
@@ -312,6 +479,77 @@ def differential_analysis_d2(analysis_df: pd.DataFrame) -> pd.DataFrame:
         print(stats_df.head(3)["marker"].tolist())
 
     return stats_df
+
+
+# =========================================================
+# NEW: Build ML dataset like in your notebook
+# =========================================================
+def build_ml_dataset(
+    analysis_df: pd.DataFrame,
+    stats_df: pd.DataFrame,
+    fdr_threshold: float = 0.01,
+) -> Tuple[pd.DataFrame, list]:
+    """
+    Build ML-ready dataset at D2:
+      - choose significant markers (FDR <= threshold, else top 3),
+      - restrict to VISIT=='D2',
+      - drop rows with missing values in those markers,
+      - add binary LABEL (1=DRUG, 0=PLACEBO).
+    Returns (ml_df, sig_markers).
+    """
+    if stats_df.empty:
+        print("\nWARNING: stats_df is empty; cannot build ML dataset.")
+        return pd.DataFrame(), []
+
+    # choose markers
+    sig_df = stats_df[stats_df["q_value"] <= fdr_threshold].copy()
+    if len(sig_df) > 0:
+        sig_markers = sig_df["marker"].tolist()
+    else:
+        sig_markers = stats_df.head(3)["marker"].tolist()
+        print("\nNo markers passed FDR <= 1%. Using top 3 markers by q-value instead:")
+        print(sig_markers)
+
+    if "VISIT" not in analysis_df.columns:
+        raise ValueError(
+            "VISIT column not found in analysis_df; cannot build D2 ML dataset."
+        )
+
+    d2 = analysis_df[analysis_df["VISIT"] == "D2"].copy()
+    if d2.empty:
+        print("\nWARNING: No VISIT == 'D2' rows; cannot build ML dataset.")
+        return pd.DataFrame(), sig_markers
+
+    # drop rows with any missing in sig_markers
+    d2_ml = d2.dropna(subset=sig_markers).copy()
+    if d2_ml.empty:
+        print("\nWARNING: After dropping NA for significant markers, no rows left.")
+        return pd.DataFrame(), sig_markers
+
+    # build label: 1=DRUG, 0=PLACEBO
+    y = (d2_ml["TREATMENT"] == "DRUG").astype(int).values
+
+    print("\n=== ML dataset (D2, selected markers) ===")
+    print("Number of rows:", d2_ml.shape[0])
+    print("Number of features:", len(sig_markers))
+    unique, counts = np.unique(y, return_counts=True)
+    print("Class balance (0=PLACEBO, 1=DRUG):")
+    print(dict(zip(unique, counts)))
+
+    # Same sanity check as in your notebook
+    if len(np.unique(y)) < 2 or d2_ml.shape[0] < 6:
+        print("\nNot enough data to train a meaningful ML model; returning empty ML dataset.")
+        return pd.DataFrame(), sig_markers
+
+    d2_ml = d2_ml.copy()
+    d2_ml["LABEL"] = y  # binary target
+
+    # Order columns: meta, features, label
+    base_cols = [c for c in ["USUBJID", "TREATMENT", "GENDER"] if c in d2_ml.columns]
+    ordered_cols = base_cols + sig_markers + ["LABEL"]
+    d2_ml = d2_ml[ordered_cols]
+
+    return d2_ml, sig_markers
 
 
 def plot_time_courses(
@@ -400,16 +638,28 @@ def plot_time_courses(
 # Utilities
 # =========================================================
 def download_from_s3(s3_uri: str, destination: Path) -> Path:
+    """Download the first CSV file from an S3 prefix or path."""
     parsed = urlparse(s3_uri)
-    if parsed.scheme != "s3" or not parsed.netloc or not parsed.path:
-        raise ValueError(f"Invalid S3 URI: {s3_uri}")
-
     bucket = parsed.netloc
-    key = parsed.path.lstrip("/")
-    destination.parent.mkdir(parents=True, exist_ok=True)
+    prefix = parsed.path.lstrip("/")
+    s3 = boto3.client("s3")
 
-    logger.info("Downloading data from bucket: %s, key: %s", bucket, key)
-    boto3.resource("s3").Bucket(bucket).download_file(key, str(destination))
+    # list all objects under the prefix
+    resp = s3.list_objects_v2(Bucket=bucket, Prefix=prefix)
+
+    if "Contents" not in resp:
+        raise FileNotFoundError(f"No objects found at {s3_uri}")
+
+    # find the first CSV
+    csv_keys = [obj["Key"] for obj in resp["Contents"] if obj["Key"].endswith(".csv")]
+    if not csv_keys:
+        raise FileNotFoundError(f"No CSV files found under {s3_uri}")
+
+    key = csv_keys[0]
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    logger.info("Downloading s3://%s/%s to %s", bucket, key, destination)
+    s3.download_file(bucket, key, str(destination))
+
     return destination
 
 
@@ -418,7 +668,7 @@ def download_from_s3(s3_uri: str, destination: Path) -> Path:
 # =========================================================
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Clinical biomarker analysis (QC, CFB, D2 diff, plots)."
+        description="Clinical biomarker analysis (QC, CFB, D2 diff, plots, ML splits)."
     )
     parser.add_argument(
         "--csv-path",
@@ -447,9 +697,10 @@ def main() -> None:
 
     csv_arg = args.csv_path
     plots_dir = Path(args.plots_dir)
+    output_base_dir = Path("/opt/ml/processing")
 
     if csv_arg.startswith("s3://"):
-        local_csv = Path("/opt/ml/processing/input/clinical.csv")
+        local_csv = output_base_dir / "input" / "clinical.csv"
         csv_path = download_from_s3(csv_arg, local_csv)
     else:
         csv_path = Path(csv_arg)
@@ -457,7 +708,7 @@ def main() -> None:
     # Always use output directory for plots inside processing output
     save_plots_dir = plots_dir
 
-    # 1. Load data
+    # 1. Load data (includes column validation)
     df = load_data(csv_path)
 
     # 2. Descriptive stats
@@ -466,15 +717,63 @@ def main() -> None:
     # 3. Missingness & QC
     analysis_df = qc_missingness(df)
 
-    # 4. Compute CFB
+    # 4. Compute CFB (creates wide-format, per-subject)
     cfb_df = compute_cfb(analysis_df)
     print("\n=== CFB dataframe shape ===")
     print(cfb_df.shape)
 
-    # 5. Differential analysis at D2
+    # Optionally save full CFB-wide dataset for reference
+    cfb_dir = output_base_dir / "cfb"
+    cfb_dir.mkdir(parents=True, exist_ok=True)
+    save_dataframe(cfb_df, cfb_dir / "cfb.csv")
+    logger.info("CFB-wide dataset saved to %s", cfb_dir / "cfb.csv")
+
+    # 5. Differential analysis at D2 (LONG format)
     stats_df = differential_analysis_d2(analysis_df)
 
-    # 6. Time-course plots → saved to output directory
+    # 6. Build ML-ready dataset at D2 using significant markers
+    ml_df, sig_markers = build_ml_dataset(analysis_df, stats_df)
+
+    if ml_df.empty:
+        # Fallback to previous behaviour: 3-way split on CFB data
+        logger.warning(
+            "ML dataset is empty or insufficient; falling back to CFB-based three-way split."
+        )
+        train_df, validation_df, test_df = three_way_split(cfb_df)
+        cleaned_full = cfb_df
+    else:
+        # Stratified 70/30 split as in your notebook
+        y = ml_df["LABEL"].values
+        indices = np.arange(len(ml_df))
+        train_idx, val_idx = train_test_split(
+            indices,
+            test_size=0.3,
+            random_state=42,
+            stratify=y,
+        )
+        train_df = ml_df.iloc[train_idx].reset_index(drop=True)
+        validation_df = ml_df.iloc[val_idx].reset_index(drop=True)
+        # Placeholder empty test set (not used, but saved)
+        test_df = pd.DataFrame(columns=ml_df.columns)
+        cleaned_full = ml_df
+
+    logger.info(
+        "Final ML splits: %d train rows, %d validation rows, %d test rows",
+        len(train_df),
+        len(validation_df),
+        len(test_df),
+    )
+
+    # 7. Save train/validation/test and full cleaned ML dataset
+    prepare_outputs(
+        train=train_df,
+        validation=validation_df,
+        test=test_df,
+        base_dir=output_base_dir,
+        cleaned_full=cleaned_full,
+    )
+
+    # 8. Time-course plots → saved to output directory
     plot_time_courses(
         analysis_df,
         stats_df,
