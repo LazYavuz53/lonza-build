@@ -28,12 +28,19 @@ if __name__ == "__main__":
 
     logger.debug("Reading test data.")
     test_path = "/opt/ml/processing/test/test.csv"
-    df = pd.read_csv(test_path, header=None)
+    df = pd.read_csv(test_path)
 
-    logger.debug("Reading test data.")
-    y_test = df.iloc[:, 0].to_numpy()
-    df.drop(df.columns[0], axis=1, inplace=True)
-    X_test = xgboost.DMatrix(df.values)
+    if "LABEL" in df.columns:
+        y_test = df["LABEL"].to_numpy()
+        features = df.drop(columns=["LABEL", "USUBJID", "TREATMENT", "GENDER"], errors="ignore")
+    else:
+        y_test = df.iloc[:, 0].to_numpy()
+        features = df.iloc[:, 1:]
+
+    if features.empty:
+        raise ValueError("Test features are empty; cannot evaluate model.")
+
+    X_test = xgboost.DMatrix(features.values)
 
     logger.info("Performing predictions against test data.")
     predictions = model.predict(X_test)

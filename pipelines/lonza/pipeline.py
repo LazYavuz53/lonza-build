@@ -218,17 +218,17 @@ def get_pipeline(
     )
     step_args = sklearn_train.fit(
         inputs={
-            "clean": TrainingInput(
+            "train": TrainingInput(
                 s3_data=step_process.properties.ProcessingOutputConfig.Outputs[
-                    "clean"
+                    "train"
                 ].S3Output.S3Uri,
                 content_type="text/csv",
             ),
-            "clean": TrainingInput(
+            "validation": TrainingInput(
                 s3_data=step_process.properties.ProcessingOutputConfig.Outputs[
-                    "clean"
+                    "validation"
                 ].S3Output.S3Uri,
-                content_type="application/json",
+                content_type="text/csv",
             ),
         },
     )
