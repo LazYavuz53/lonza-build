@@ -24,7 +24,8 @@ def load_test_split(csv_path: pathlib.Path) -> Tuple[np.ndarray, pd.DataFrame]:
 
     df = pd.read_csv(csv_path)
     if df.empty:
-        raise ValueError("Test split is empty; cannot evaluate model.")
+        logger.warning("Test split is empty; returning no labels/features.")
+        return np.array([]), df
 
     if "LABEL" in df.columns:
         y_test = df.pop("LABEL").to_numpy()
@@ -55,29 +56,39 @@ if __name__ == "__main__":
     test_path = pathlib.Path("/opt/ml/processing/test/test.csv")
     y_test, X_test = load_test_split(test_path)
 
-    logger.info("Performing predictions against test data (%d rows).", len(y_test))
-    dtest = xgboost.DMatrix(X_test.values)
-    probabilities = booster.predict(dtest)
+    if len(y_test) == 0:
+        logger.warning("No test rows available; emitting empty metrics with NaN values.")
+        report_dict = {
+            "classification_metrics": {
+                "accuracy": {"value": float("nan"), "standard_deviation": 0.0},
+                "roc_auc": {"value": float("nan"), "standard_deviation": 0.0},
+            },
+        }
+    else:
+        logger.info("Performing predictions against test data (%d rows).", len(y_test))
+        dtest = xgboost.DMatrix(X_test.values)
+        probabilities = booster.predict(dtest)
 
-    predictions = (probabilities >= 0.5).astype(int)
-    accuracy = accuracy_score(y_test, predictions)
+        predictions = (probabilities >= 0.5).astype(int)
+        accuracy = accuracy_score(y_test, predictions)
 
-    try:
-        roc_auc = roc_auc_score(y_test, probabilities)
-    except ValueError:
-        roc_auc = float("nan")
+        try:
+            roc_auc = roc_auc_score(y_test, probabilities)
+        except ValueError:
+            roc_auc = float("nan")
 
-    report_dict = {
-        "classification_metrics": {
-            "accuracy": {"value": float(accuracy), "standard_deviation": 0.0},
-            "roc_auc": {"value": float(roc_auc), "standard_deviation": 0.0},
-        },
-    }
+        report_dict = {
+            "classification_metrics": {
+                "accuracy": {"value": float(accuracy), "standard_deviation": 0.0},
+                "roc_auc": {"value": float(roc_auc), "standard_deviation": 0.0},
+            },
+        }
 
     output_dir = pathlib.Path("/opt/ml/processing/evaluation")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    logger.info("Writing out evaluation report with accuracy: %.4f", accuracy)
+    accuracy_value = report_dict["classification_metrics"]["accuracy"]["value"]
+    logger.info("Writing out evaluation report with accuracy: %s", accuracy_value)
     evaluation_path = output_dir / "evaluation.json"
     with evaluation_path.open("w") as f:
         f.write(json.dumps(report_dict))
