@@ -1,4 +1,16 @@
 """Evaluation script that reports binary classification metrics."""
+from sklearn.metrics import (
+    accuracy_score,
+    classification_report,
+    roc_auc_score,
+    roc_curve,
+)
+from sklearn.calibration import calibration_curve
+import matplotlib.pyplot as plt
+import matplotlib
+import xgboost as xgb
+import pandas as pd
+import numpy as np
 import json
 import logging
 import pathlib
@@ -19,25 +31,15 @@ subprocess.check_call(
         "xgboost==1.7.6",
     ]
 )
-import numpy as np
-import pandas as pd
-import xgboost as xgb
-import matplotlib
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-from sklearn.calibration import calibration_curve
-from sklearn.metrics import (
-    accuracy_score,
-    classification_report,
-    roc_auc_score,
-    roc_curve,
-)
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 logger.addHandler(logging.StreamHandler())
 
 NON_FEATURE_COLUMNS = ["USUBJID", "TREATMENT", "GENDER"]
+
+
 def load_test_split(csv_path: pathlib.Path) -> Tuple[np.ndarray, pd.DataFrame]:
     """Load the test split and return labels and feature frame."""
 
@@ -55,7 +57,8 @@ def load_test_split(csv_path: pathlib.Path) -> Tuple[np.ndarray, pd.DataFrame]:
         y_test = df.iloc[:, 0].to_numpy()
         df = df.iloc[:, 1:]
 
-    feature_df = df.drop(columns=[c for c in NON_FEATURE_COLUMNS if c in df.columns])
+    feature_df = df.drop(
+        columns=[c for c in NON_FEATURE_COLUMNS if c in df.columns])
 
     return y_test, feature_df
 
@@ -84,7 +87,8 @@ if __name__ == "__main__":
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if len(y_test) == 0:
-        logger.warning("No test rows available; emitting zeroed metrics instead of NaN values.")
+        logger.warning(
+            "No test rows available; emitting zeroed metrics instead of NaN values.")
         report_dict = {
             "classification_metrics": {
                 "accuracy": {"value": 0.0, "standard_deviation": 0.0},
@@ -92,7 +96,8 @@ if __name__ == "__main__":
             },
         }
     else:
-        logger.info("Performing predictions against test data (%d rows).", len(y_test))
+        logger.info(
+            "Performing predictions against test data (%d rows).", len(y_test))
         dtest = xgb.DMatrix(X_test.values)
         probabilities = booster.predict(dtest)
 
@@ -103,12 +108,14 @@ if __name__ == "__main__":
         try:
             roc_auc = roc_auc_score(y_test_np, probabilities)
         except ValueError:
-            logger.warning("ROC AUC could not be computed because only one class is present. Using 0.0.")
+            logger.warning(
+                "ROC AUC could not be computed because only one class is present. Using 0.0.")
             roc_auc = 0.0
 
         print("\nAccuracy:", accuracy_score(y_test_np, predictions))
         print("ROC AUC:", roc_auc)
-        print("\nClassification Report:\n", classification_report(y_test_np, predictions, zero_division=0))
+        print("\nClassification Report:\n", classification_report(
+            y_test_np, predictions, zero_division=0))
 
         if len(np.unique(y_test_np)) > 1:
             fpr, tpr, _ = roc_curve(y_test_np, probabilities)
@@ -123,10 +130,12 @@ if __name__ == "__main__":
             roc_path = output_dir / "roc_curve.png"
             plt.savefig(roc_path, bbox_inches="tight")
         else:
-            logger.warning("Skipping ROC curve plot because only one class is present in y_test.")
+            logger.warning(
+                "Skipping ROC curve plot because only one class is present in y_test.")
 
         try:
-            prob_true, prob_pred = calibration_curve(y_test_np, probabilities, n_bins=10)
+            prob_true, prob_pred = calibration_curve(
+                y_test_np, probabilities, n_bins=10)
             plt.figure()
             plt.plot(prob_pred, prob_true, marker="o")
             plt.plot([0, 1], [0, 1], "--")
@@ -137,7 +146,8 @@ if __name__ == "__main__":
             calibration_path = output_dir / "calibration_curve.png"
             plt.savefig(calibration_path, bbox_inches="tight")
         except ValueError:
-            logger.warning("Skipping calibration curve because it cannot be computed for this dataset.")
+            logger.warning(
+                "Skipping calibration curve because it cannot be computed for this dataset.")
 
         report_dict = {
             "classification_metrics": {
@@ -147,7 +157,8 @@ if __name__ == "__main__":
         }
 
     accuracy_value = report_dict["classification_metrics"]["accuracy"]["value"]
-    logger.info("Writing out evaluation report with accuracy: %s", accuracy_value)
+    logger.info("Writing out evaluation report with accuracy: %s",
+                accuracy_value)
     evaluation_path = output_dir / "evaluation.json"
     with evaluation_path.open("w") as f:
         f.write(json.dumps(report_dict, allow_nan=False))

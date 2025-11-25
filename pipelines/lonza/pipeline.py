@@ -114,7 +114,8 @@ def get_pipeline_session(region, default_bucket):
 def get_pipeline_custom_tags(new_tags, region, sagemaker_project_name=None):
     try:
         sm_client = get_sagemaker_client(region)
-        response = sm_client.describe_project(ProjectName=sagemaker_project_name)
+        response = sm_client.describe_project(
+            ProjectName=sagemaker_project_name)
         sagemaker_project_arn = response["ProjectArn"]
         response = sm_client.list_tags(ResourceArn=sagemaker_project_arn)
         project_tags = response["Tags"]
@@ -181,12 +182,15 @@ def get_pipeline(
     )
     step_args = sklearn_processor.run(
         outputs=[
-            ProcessingOutput(output_name="train", source="/opt/ml/processing/train"),
+            ProcessingOutput(output_name="train",
+                             source="/opt/ml/processing/train"),
             ProcessingOutput(
                 output_name="validation", source="/opt/ml/processing/validation"
             ),
-            ProcessingOutput(output_name="test", source="/opt/ml/processing/test"),
-            ProcessingOutput(output_name="figures", source="/opt/ml/processing/figures"),
+            ProcessingOutput(output_name="test",
+                             source="/opt/ml/processing/test"),
+            ProcessingOutput(output_name="figures",
+                             source="/opt/ml/processing/figures"),
             ProcessingOutput(
                 output_name="clean", source="/opt/ml/processing/clean"
             ),

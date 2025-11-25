@@ -10,10 +10,17 @@ Clinical biomarker analysis script for SageMaker Processing.
 - Time-course plots for significant markers → saved to /opt/ml/processing/output/
 - ML train/validation dataset built from D2, using significant biomarkers
 """
+from sklearn.model_selection import train_test_split  # <<< NEW
+from scipy.stats import ttest_ind
+import numpy as np
+
+import pandas as pd
+import matplotlib.pyplot as plt
+
 import argparse
 import logging
 from pathlib import Path
-from typing import Optional, Tuple, Iterable
+from typing import Optional, Tuple
 from urllib.parse import urlparse
 
 import boto3
@@ -22,19 +29,19 @@ import sys
 import os
 
 # <<< NEW: install scikit-learn as well
-subprocess.check_call([
-    sys.executable, "-m", "pip", "install",
-    "matplotlib", "seaborn", "pandas", "scikit-learn"
-])
+subprocess.check_call(
+    [
+        sys.executable,
+        "-m",
+        "pip",
+        "install",
+        "matplotlib",
+        "seaborn",
+        "pandas",
+        "scikit-learn",
+    ]
+)
 
-import matplotlib
-import matplotlib.pyplot as plt
-
-import pandas as pd
-import seaborn as sns
-import numpy as np
-from scipy.stats import ttest_ind
-from sklearn.model_selection import train_test_split  # <<< NEW
 
 plt.rcParams["figure.figsize"] = (6, 4)
 plt.rcParams["figure.dpi"] = 120
@@ -105,7 +112,11 @@ def three_way_split(
     remaining = shuffled.iloc[test_size:]
 
     if remaining.empty:
-        return pd.DataFrame(columns=df.columns), pd.DataFrame(columns=df.columns), test
+        return (
+            pd.DataFrame(columns=df.columns),
+            pd.DataFrame(columns=df.columns),
+            test,
+        )
 
     train, validation = perform_split(remaining)
     return train, validation, test
@@ -182,18 +193,18 @@ def validate_and_clean_columns(df: pd.DataFrame) -> pd.DataFrame:
     """
     # Strip whitespace from column names
     df.columns = df.columns.str.strip()
-    
+
     print("\n=== Column Validation ===")
     print(f"Available columns: {df.columns.tolist()}")
-    
+
     # Required columns mapping (case-insensitive check)
     required_cols = {
-        'VISIT': ['VISIT', 'visit', 'Visit', 'AVISIT', 'AVISITN'],
-        'TREATMENT': ['TREATMENT', 'treatment', 'TRT', 'ARM', 'ARMCD'],
-        'USUBJID': ['USUBJID', 'usubjid', 'SUBJID', 'subject_id', 'SUBJECT'],
-        'GENDER': ['GENDER', 'gender', 'SEX', 'sex']
+        "VISIT": ["VISIT", "visit", "Visit", "AVISIT", "AVISITN"],
+        "TREATMENT": ["TREATMENT", "treatment", "TRT", "ARM", "ARMCD"],
+        "USUBJID": ["USUBJID", "usubjid", "SUBJID", "subject_id", "SUBJECT"],
+        "GENDER": ["GENDER", "gender", "SEX", "sex"],
     }
-    
+
     # Try to find and standardize each required column
     for std_name, variants in required_cols.items():
         found = False
@@ -204,11 +215,14 @@ def validate_and_clean_columns(df: pd.DataFrame) -> pd.DataFrame:
                     df = df.rename(columns={variant: std_name})
                 found = True
                 break
-        
+
         if not found:
             # Check for partial matches
-            partial_matches = [col for col in df.columns 
-                             if any(v.lower() in col.lower() for v in variants)]
+            partial_matches = [
+                col
+                for col in df.columns
+                if any(v.lower() in col.lower() for v in variants)
+            ]
             if partial_matches:
                 raise ValueError(
                     f"Could not find required column '{std_name}'. "
@@ -220,50 +234,56 @@ def validate_and_clean_columns(df: pd.DataFrame) -> pd.DataFrame:
                     f"Required column '{std_name}' not found. "
                     f"Available columns: {df.columns.tolist()}"
                 )
-    
+
     # Validate VISIT values
-    if 'VISIT' in df.columns:
-        unique_visits = df['VISIT'].unique()
+    if "VISIT" in df.columns:
+        unique_visits = df["VISIT"].unique()
         print(f"\nUnique VISIT values: {unique_visits}")
-        
+
         # Check if visits need standardization
         visit_mapping = {}
         for visit in unique_visits:
             if pd.notna(visit):
                 visit_str = str(visit).strip().upper()
                 # Handle various formats: D0, Day 0, Day0, 0, etc.
-                if '0' in visit_str or 'BASELINE' in visit_str or 'BL' in visit_str:
-                    visit_mapping[visit] = 'D0'
-                elif '1' in visit_str:
-                    visit_mapping[visit] = 'D1'
-                elif '2' in visit_str:
-                    visit_mapping[visit] = 'D2'
-        
+                if "0" in visit_str or "BASELINE" in visit_str or "BL" in visit_str:
+                    visit_mapping[visit] = "D0"
+                elif "1" in visit_str:
+                    visit_mapping[visit] = "D1"
+                elif "2" in visit_str:
+                    visit_mapping[visit] = "D2"
+
         if visit_mapping:
             print(f"Applying visit mapping: {visit_mapping}")
-            df['VISIT'] = df['VISIT'].map(lambda x: visit_mapping.get(x, x))
+            df["VISIT"] = df["VISIT"].map(lambda x: visit_mapping.get(x, x))
             print(f"Standardized VISIT values: {df['VISIT'].unique()}")
-    
+
     # Validate TREATMENT values
-    if 'TREATMENT' in df.columns:
-        unique_treatments = df['TREATMENT'].unique()
+    if "TREATMENT" in df.columns:
+        unique_treatments = df["TREATMENT"].unique()
         print(f"\nUnique TREATMENT values: {unique_treatments}")
-        
+
         # Standardize treatment names
         treatment_mapping = {}
         for trt in unique_treatments:
             if pd.notna(trt):
                 trt_str = str(trt).strip().upper()
-                if 'DRUG' in trt_str or 'ACTIVE' in trt_str or 'TRT' in trt_str:
-                    treatment_mapping[trt] = 'DRUG'
-                elif 'PLACEBO' in trt_str or 'PBO' in trt_str or 'CONTROL' in trt_str:
-                    treatment_mapping[trt] = 'PLACEBO'
-        
+                if "DRUG" in trt_str or "ACTIVE" in trt_str or "TRT" in trt_str:
+                    treatment_mapping[trt] = "DRUG"
+                elif (
+                    "PLACEBO" in trt_str
+                    or "PBO" in trt_str
+                    or "CONTROL" in trt_str
+                ):
+                    treatment_mapping[trt] = "PLACEBO"
+
         if treatment_mapping:
             print(f"Applying treatment mapping: {treatment_mapping}")
-            df['TREATMENT'] = df['TREATMENT'].map(lambda x: treatment_mapping.get(x, x))
+            df["TREATMENT"] = df["TREATMENT"].map(
+                lambda x: treatment_mapping.get(x, x)
+            )
             print(f"Standardized TREATMENT values: {df['TREATMENT'].unique()}")
-    
+
     return df
 
 
@@ -272,7 +292,7 @@ def validate_and_clean_columns(df: pd.DataFrame) -> pd.DataFrame:
 # =========================================================
 def load_data(csv_path: Path) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
-    
+
     # Validate and clean columns first
     df = validate_and_clean_columns(df)
 
@@ -406,7 +426,7 @@ def compute_cfb(analysis_df: pd.DataFrame) -> pd.DataFrame:
 def differential_analysis_d2(analysis_df: pd.DataFrame) -> pd.DataFrame:
     """
     D2 differential analysis (DRUG vs PLACEBO) with BH-FDR.
-    
+
     IMPORTANT: This function expects analysis_df in LONG format with VISIT column intact.
     """
     marker_cols = [c for c in analysis_df.columns if c.startswith("MARKER_")]
@@ -424,12 +444,12 @@ def differential_analysis_d2(analysis_df: pd.DataFrame) -> pd.DataFrame:
 
     print("\n=== D2 subset info (analysis dataset) ===")
     print("D2 rows:", len(d2))
-    
+
     if len(d2) == 0:
         print("WARNING: No rows found for VISIT='D2'")
         print(f"Available VISIT values: {analysis_df['VISIT'].unique()}")
         return pd.DataFrame(columns=["marker", "p_value", "q_value"])
-    
+
     print("D2 TREATMENT counts:")
     print(d2["TREATMENT"].value_counts())
 
@@ -538,7 +558,9 @@ def build_ml_dataset(
 
     # Same sanity check as in your notebook
     if len(np.unique(y)) < 2 or d2_ml.shape[0] < 6:
-        print("\nNot enough data to train a meaningful ML model; returning empty ML dataset.")
+        print(
+            "\nNot enough data to train a meaningful ML model; returning empty ML dataset."
+        )
         return pd.DataFrame(), sig_markers
 
     d2_ml = d2_ml.copy()
@@ -615,12 +637,12 @@ def plot_time_courses(
                 fontsize=8,
                 fontweight="bold",
                 color="red",
-                bbox=dict(
-                    boxstyle="round,pad=0.1",
-                    fc="white",
-                    ec="black",
-                    alpha=0.8,
-                ),
+                bbox={
+                    "boxstyle": "round,pad=0.1",
+                    "fc": "white",
+                    "ec": "black",
+                    "alpha": 0.8,
+                },
             )
 
         plt.tight_layout()
@@ -710,7 +732,11 @@ def stratified_train_val_test(
     )
 
     if train_val.empty:
-        return pd.DataFrame(columns=df.columns), pd.DataFrame(columns=df.columns), test.reset_index(drop=True)
+        return (
+            pd.DataFrame(columns=df.columns),
+            pd.DataFrame(columns=df.columns),
+            test.reset_index(drop=True),
+        )
 
     # Validation fraction is applied to the remaining train/val pool
     val_size = max(1, int(val_fraction * len(train_val)))
@@ -718,7 +744,11 @@ def stratified_train_val_test(
         val_size = len(train_val) - 1
 
     val_stratify: Optional[pd.Series]
-    if stratify_labels is not None and train_val[label_col].nunique() > 1 and len(train_val) >= 3:
+    if (
+        stratify_labels is not None
+        and train_val[label_col].nunique() > 1
+        and len(train_val) >= 3
+    ):
         val_stratify = train_val[label_col]
     else:
         val_stratify = None
