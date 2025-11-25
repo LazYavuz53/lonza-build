@@ -290,5 +290,28 @@ proba = pipe.predict_proba(new_sample)[0, 1]
 print("Predicted regimen:", "DRUG" if pred == 1 else "PLACEBO")
 print("Probability (DRUG):", proba)
 
+</details>
 
+
+<details>
+
+<summary><b>☁️ AWS SageMaker End-to-End Pipeline (click to expand)</b></summary>
+
+An **end-to-end ML pipeline** was developed to automate the full workflow — from preprocessing to model registration.
+
+### Pipeline Components
+
+| Script | Description |
+|--------|--------------|
+| `pipeline.py` | Orchestrates the entire MLOps workflow (preprocessing → training → evaluation → registration). |
+| `preprocess.py` | Loads and preprocesses data from S3. |
+| `train.py` | Trains allele-specific models and saves them to S3. |
+| `evaluate.py` | Evaluates models using the test set. |
+| **Model Registration** | Registers models for deployment after manual approval. |
+
+✅ The pipeline runs successfully end-to-end, ensuring **reproducibility**, **traceability**, and **automation**.
+
+![alt text](img/image-5.png)
+
+</details>
 
