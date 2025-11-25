@@ -9,7 +9,16 @@ import numpy as np
 import pandas as pd
 import xgboost
 
-from sklearn.metrics import accuracy_score, roc_auc_score
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from sklearn.calibration import calibration_curve
+from sklearn.metrics import (
+    accuracy_score,
+    classification_report,
+    roc_auc_score,
+    roc_curve,
+)
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -56,6 +65,9 @@ if __name__ == "__main__":
     test_path = pathlib.Path("/opt/ml/processing/test/test.csv")
     y_test, X_test = load_test_split(test_path)
 
+    output_dir = pathlib.Path("/opt/ml/processing/evaluation")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
     if len(y_test) == 0:
         logger.warning("No test rows available; emitting zeroed metrics instead of NaN values.")
         report_dict = {
@@ -71,11 +83,46 @@ if __name__ == "__main__":
 
         predictions = (probabilities >= 0.5).astype(int)
         accuracy = accuracy_score(y_test, predictions)
+        y_test_np = np.asarray(y_test)
 
         try:
-            roc_auc = roc_auc_score(y_test, probabilities)
+            roc_auc = roc_auc_score(y_test_np, probabilities)
         except ValueError:
-            roc_auc = float("nan")
+            logger.warning("ROC AUC could not be computed because only one class is present. Using 0.0.")
+            roc_auc = 0.0
+
+        print("\nAccuracy:", accuracy_score(y_test_np, predictions))
+        print("ROC AUC:", roc_auc)
+        print("\nClassification Report:\n", classification_report(y_test_np, predictions, zero_division=0))
+
+        if len(np.unique(y_test_np)) > 1:
+            fpr, tpr, _ = roc_curve(y_test_np, probabilities)
+            plt.figure()
+            plt.plot(fpr, tpr, label=f"AUC = {roc_auc:.3f}")
+            plt.plot([0, 1], [0, 1], "--")
+            plt.legend()
+            plt.xlabel("FPR")
+            plt.ylabel("TPR")
+            plt.title("ROC Curve – D2 Important Biomarkers")
+            plt.grid(True)
+            roc_path = output_dir / "roc_curve.png"
+            plt.savefig(roc_path, bbox_inches="tight")
+        else:
+            logger.warning("Skipping ROC curve plot because only one class is present in y_test.")
+
+        try:
+            prob_true, prob_pred = calibration_curve(y_test_np, probabilities, n_bins=10)
+            plt.figure()
+            plt.plot(prob_pred, prob_true, marker="o")
+            plt.plot([0, 1], [0, 1], "--")
+            plt.title("Calibration Curve")
+            plt.xlabel("Mean Predicted Probability")
+            plt.ylabel("Fraction of Positives")
+            plt.grid(True)
+            calibration_path = output_dir / "calibration_curve.png"
+            plt.savefig(calibration_path, bbox_inches="tight")
+        except ValueError:
+            logger.warning("Skipping calibration curve because it cannot be computed for this dataset.")
 
         report_dict = {
             "classification_metrics": {
@@ -83,9 +130,6 @@ if __name__ == "__main__":
                 "roc_auc": {"value": float(roc_auc), "standard_deviation": 0.0},
             },
         }
-
-    output_dir = pathlib.Path("/opt/ml/processing/evaluation")
-    output_dir.mkdir(parents=True, exist_ok=True)
 
     accuracy_value = report_dict["classification_metrics"]["accuracy"]["value"]
     logger.info("Writing out evaluation report with accuracy: %s", accuracy_value)
