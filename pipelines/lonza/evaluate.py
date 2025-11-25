@@ -7,7 +7,18 @@ from typing import Tuple
 import subprocess
 import sys
 # Install xgboost before importing it
-subprocess.check_call([sys.executable, "-m", "pip", "install", "matplotlib", "xgboost"])
+subprocess.check_call(
+    [
+        sys.executable,
+        "-m",
+        "pip",
+        "install",
+        "--no-cache-dir",
+        "numpy==1.23.5",
+        "matplotlib==3.7.5",
+        "xgboost==1.7.6",
+    ]
+)
 import numpy as np
 import pandas as pd
 import xgboost as xgb
@@ -26,7 +37,7 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 logger.addHandler(logging.StreamHandler())
 
-
+NON_FEATURE_COLUMNS = ["USUBJID", "TREATMENT", "GENDER"]
 def load_test_split(csv_path: pathlib.Path) -> Tuple[np.ndarray, pd.DataFrame]:
     """Load the test split and return labels and feature frame."""
 
@@ -44,7 +55,9 @@ def load_test_split(csv_path: pathlib.Path) -> Tuple[np.ndarray, pd.DataFrame]:
         y_test = df.iloc[:, 0].to_numpy()
         df = df.iloc[:, 1:]
 
-    return y_test, df
+    feature_df = df.drop(columns=[c for c in NON_FEATURE_COLUMNS if c in df.columns])
+
+    return y_test, feature_df
 
 
 def load_model(model_artifact: pathlib.Path) -> xgb.Booster:
