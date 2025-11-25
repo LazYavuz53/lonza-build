@@ -57,11 +57,11 @@ if __name__ == "__main__":
     y_test, X_test = load_test_split(test_path)
 
     if len(y_test) == 0:
-        logger.warning("No test rows available; emitting empty metrics with NaN values.")
+        logger.warning("No test rows available; emitting zeroed metrics instead of NaN values.")
         report_dict = {
             "classification_metrics": {
-                "accuracy": {"value": float("nan"), "standard_deviation": 0.0},
-                "roc_auc": {"value": float("nan"), "standard_deviation": 0.0},
+                "accuracy": {"value": 0.0, "standard_deviation": 0.0},
+                "roc_auc": {"value": 0.0, "standard_deviation": 0.0},
             },
         }
     else:
@@ -91,4 +91,4 @@ if __name__ == "__main__":
     logger.info("Writing out evaluation report with accuracy: %s", accuracy_value)
     evaluation_path = output_dir / "evaluation.json"
     with evaluation_path.open("w") as f:
-        f.write(json.dumps(report_dict))
+        f.write(json.dumps(report_dict, allow_nan=False))
