@@ -663,6 +663,80 @@ def download_from_s3(s3_uri: str, destination: Path) -> Path:
     return destination
 
 
+def stratified_train_val_test(
+    df: pd.DataFrame,
+    label_col: str = "LABEL",
+    test_fraction: float = 0.2,
+    val_fraction: float = 0.2,
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Create stratified train/validation/test splits when possible.
+
+    * ``test_fraction`` is applied to the full dataset.
+    * ``val_fraction`` is applied to the remaining portion (train+val).
+    * Guarantees at least one row in test/validation when the input has
+      enough rows; falls back to unstratified splitting when stratification
+      is impossible (e.g., single-class labels or very small datasets).
+    """
+
+    if df.empty:
+        return df.copy(), df.copy(), df.copy()
+
+    n_rows = len(df)
+    stratify_labels: Optional[pd.Series]
+
+    # Determine whether stratification is feasible
+    if df[label_col].nunique() > 1 and n_rows >= 4:
+        stratify_labels = df[label_col]
+    else:
+        stratify_labels = None
+        logger.warning(
+            "Unable to stratify splits (unique labels: %d, rows: %d); "
+            "falling back to unstratified splitting.",
+            df[label_col].nunique(),
+            n_rows,
+        )
+
+    # Compute test size with an integer floor of the fraction but ensure at least 1 and
+    # leave room for train/validation
+    test_size = max(1, int(test_fraction * n_rows))
+    if test_size >= n_rows:
+        test_size = n_rows - 1
+
+    train_val, test = train_test_split(
+        df,
+        test_size=test_size,
+        random_state=42,
+        stratify=stratify_labels,
+    )
+
+    if train_val.empty:
+        return pd.DataFrame(columns=df.columns), pd.DataFrame(columns=df.columns), test.reset_index(drop=True)
+
+    # Validation fraction is applied to the remaining train/val pool
+    val_size = max(1, int(val_fraction * len(train_val)))
+    if val_size >= len(train_val):
+        val_size = len(train_val) - 1
+
+    val_stratify: Optional[pd.Series]
+    if stratify_labels is not None and train_val[label_col].nunique() > 1 and len(train_val) >= 3:
+        val_stratify = train_val[label_col]
+    else:
+        val_stratify = None
+
+    train, val = train_test_split(
+        train_val,
+        test_size=val_size,
+        random_state=42,
+        stratify=val_stratify,
+    )
+
+    return (
+        train.reset_index(drop=True),
+        val.reset_index(drop=True),
+        test.reset_index(drop=True),
+    )
+
+
 # =========================================================
 # Main
 # =========================================================
@@ -742,19 +816,12 @@ def main() -> None:
         train_df, validation_df, test_df = three_way_split(cfb_df)
         cleaned_full = cfb_df
     else:
-        # Stratified 70/30 split as in your notebook
-        y = ml_df["LABEL"].values
-        indices = np.arange(len(ml_df))
-        train_idx, val_idx = train_test_split(
-            indices,
-            test_size=0.3,
-            random_state=42,
-            stratify=y,
+        train_df, validation_df, test_df = stratified_train_val_test(
+            ml_df,
+            label_col="LABEL",
+            test_fraction=0.2,
+            val_fraction=0.25,  # 20% test; 25% of remaining ≈ 20% validation
         )
-        train_df = ml_df.iloc[train_idx].reset_index(drop=True)
-        validation_df = ml_df.iloc[val_idx].reset_index(drop=True)
-        # Placeholder empty test set (not used, but saved)
-        test_df = pd.DataFrame(columns=ml_df.columns)
         cleaned_full = ml_df
 
     logger.info(
