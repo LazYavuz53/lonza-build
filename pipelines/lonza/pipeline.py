@@ -209,26 +209,20 @@ def get_pipeline(
         base_job_name=f"{base_job_prefix}/sklearn-LonzaClinicalMarker-train",
         sagemaker_session=pipeline_session,
         role=role,
-        hyperparameters={
-            "epochs": 10,
-            "chunk-size": 50_000,
-            "max-iter": 5,
-            "random-state": 53,
-        },
     )
     step_args = sklearn_train.fit(
         inputs={
-            "clean": TrainingInput(
+            "train": TrainingInput(
                 s3_data=step_process.properties.ProcessingOutputConfig.Outputs[
-                    "clean"
+                    "train"
                 ].S3Output.S3Uri,
                 content_type="text/csv",
             ),
-            "clean": TrainingInput(
+            "validation": TrainingInput(
                 s3_data=step_process.properties.ProcessingOutputConfig.Outputs[
-                    "clean"
+                    "validation"
                 ].S3Output.S3Uri,
-                content_type="application/json",
+                content_type="text/csv",
             ),
         },
     )
@@ -259,12 +253,6 @@ def get_pipeline(
                     "test"
                 ].S3Output.S3Uri,
                 destination="/opt/ml/processing/test",
-            ),
-            ProcessingInput(
-                source=step_process.properties.ProcessingOutputConfig.Outputs[
-                    "clean"
-                ].S3Output.S3Uri,
-                destination="/opt/ml/processing/clean",
             ),
             ProcessingInput(
                 source=step_process.properties.ProcessingOutputConfig.Outputs[
