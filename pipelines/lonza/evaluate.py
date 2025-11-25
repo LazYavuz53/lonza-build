@@ -1,59 +1,83 @@
-"""Evaluation script for measuring mean squared error."""
+"""Evaluation script that reports binary classification metrics."""
 import json
 import logging
 import pathlib
-import pickle
 import tarfile
+from typing import Tuple
 
 import numpy as np
 import pandas as pd
 import xgboost
 
-from sklearn.metrics import mean_squared_error
+from sklearn.metrics import accuracy_score, roc_auc_score
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 logger.addHandler(logging.StreamHandler())
 
 
+def load_test_split(csv_path: pathlib.Path) -> Tuple[np.ndarray, pd.DataFrame]:
+    """Load the test split and return labels and feature frame."""
+
+    if not csv_path.exists():
+        raise FileNotFoundError(f"Expected test split at {csv_path}")
+
+    df = pd.read_csv(csv_path)
+    if df.empty:
+        raise ValueError("Test split is empty; cannot evaluate model.")
+
+    if "LABEL" in df.columns:
+        y_test = df.pop("LABEL").to_numpy()
+    else:
+        y_test = df.iloc[:, 0].to_numpy()
+        df = df.iloc[:, 1:]
+
+    return y_test, df
+
+
+def load_model(model_artifact: pathlib.Path) -> xgboost.Booster:
+    """Load a persisted XGBoost booster from the extracted model bundle."""
+
+    booster = xgboost.Booster()
+    booster.load_model(model_artifact)
+    return booster
+
 
 if __name__ == "__main__":
-    logger.debug("Starting evaluation.")
-    model_path = "/opt/ml/processing/model/model.tar.gz"
+    logger.info("Starting evaluation.")
+
+    model_path = pathlib.Path("/opt/ml/processing/model/model.tar.gz")
     with tarfile.open(model_path) as tar:
         tar.extractall(path=".")
 
-    logger.debug("Loading xgboost model.")
-    model = pickle.load(open("xgboost-model", "rb"))
+    booster = load_model(pathlib.Path("xgboost-model"))
 
-    logger.debug("Reading test data.")
-    test_path = "/opt/ml/processing/test/test.csv"
-    df = pd.read_csv(test_path, header=None)
+    test_path = pathlib.Path("/opt/ml/processing/test/test.csv")
+    y_test, X_test = load_test_split(test_path)
 
-    logger.debug("Reading test data.")
-    y_test = df.iloc[:, 0].to_numpy()
-    df.drop(df.columns[0], axis=1, inplace=True)
-    X_test = xgboost.DMatrix(df.values)
+    logger.info("Performing predictions against test data (%d rows).", len(y_test))
+    dtest = xgboost.DMatrix(X_test.values)
+    probabilities = booster.predict(dtest)
 
-    logger.info("Performing predictions against test data.")
-    predictions = model.predict(X_test)
+    predictions = (probabilities >= 0.5).astype(int)
+    accuracy = accuracy_score(y_test, predictions)
 
-    logger.debug("Calculating mean squared error.")
-    mse = mean_squared_error(y_test, predictions)
-    std = np.std(y_test - predictions)
+    try:
+        roc_auc = roc_auc_score(y_test, probabilities)
+    except ValueError:
+        roc_auc = float("nan")
+
     report_dict = {
-        "regression_metrics": {
-            "mse": {
-                "value": mse,
-                "standard_deviation": std
-            },
+        "classification_metrics": {
+            "accuracy": {"value": float(accuracy), "standard_deviation": 0.0},
+            "roc_auc": {"value": float(roc_auc), "standard_deviation": 0.0},
         },
     }
 
-    output_dir = "/opt/ml/processing/evaluation"
-    pathlib.Path(output_dir).mkdir(parents=True, exist_ok=True)
+    output_dir = pathlib.Path("/opt/ml/processing/evaluation")
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    logger.info("Writing out evaluation report with mse: %f", mse)
-    evaluation_path = f"{output_dir}/evaluation.json"
-    with open(evaluation_path, "w") as f:
+    logger.info("Writing out evaluation report with accuracy: %.4f", accuracy)
+    evaluation_path = output_dir / "evaluation.json"
+    with evaluation_path.open("w") as f:
         f.write(json.dumps(report_dict))
