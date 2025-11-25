@@ -11,6 +11,7 @@ subprocess.check_call([sys.executable, "-m", "pip", "install", "matplotlib", "xg
 import numpy as np
 import pandas as pd
 import xgboost as xgb
+import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from sklearn.calibration import calibration_curve
