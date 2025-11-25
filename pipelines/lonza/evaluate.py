@@ -7,7 +7,11 @@ import tarfile
 
 import numpy as np
 import pandas as pd
-import xgboost
+import subprocess
+import sys
+# Install xgboost before importing it
+subprocess.check_call([sys.executable, "-m", "pip", "install", "xgboost"])
+import xgboost as xgb
 
 from sklearn.metrics import mean_squared_error
 
@@ -24,16 +28,24 @@ if __name__ == "__main__":
         tar.extractall(path=".")
 
     logger.debug("Loading xgboost model.")
-    model = pickle.load(open("xgboost-model", "rb"))
+    model = xgb.Booster()
+    model.load_model("xgboost-model")
 
     logger.debug("Reading test data.")
     test_path = "/opt/ml/processing/test/test.csv"
-    df = pd.read_csv(test_path, header=None)
+    df = pd.read_csv(test_path)
 
-    logger.debug("Reading test data.")
-    y_test = df.iloc[:, 0].to_numpy()
-    df.drop(df.columns[0], axis=1, inplace=True)
-    X_test = xgboost.DMatrix(df.values)
+    if "LABEL" in df.columns:
+        y_test = df["LABEL"].to_numpy()
+        features = df.drop(columns=["LABEL", "USUBJID", "TREATMENT", "GENDER"], errors="ignore")
+    else:
+        y_test = df.iloc[:, 0].to_numpy()
+        features = df.iloc[:, 1:]
+
+    if features.empty:
+        raise ValueError("Test features are empty; cannot evaluate model.")
+
+    X_test = xgb.DMatrix(features.values)
 
     logger.info("Performing predictions against test data.")
     predictions = model.predict(X_test)
