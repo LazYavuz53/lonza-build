@@ -757,10 +757,10 @@ def parse_args() -> argparse.Namespace:
         "--plots-dir",
         dest="plots_dir",
         type=str,
-        default="/opt/ml/processing/output",
+        default="/opt/ml/processing/figures",
         help=(
             "Directory where plots will be stored "
-            "(default: /opt/ml/processing/output)."
+            "(default: /opt/ml/processing/figures)."
         ),
     )
     return parser.parse_args()
