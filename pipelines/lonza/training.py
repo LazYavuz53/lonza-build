@@ -1,4 +1,6 @@
 """Training script that consumes pre-split datasets from preprocess.py outputs."""
+import pandas as pd
+import xgboost as xgb
 import argparse
 import json
 import logging
@@ -12,10 +14,6 @@ import sys
 # Install xgboost before importing it
 subprocess.check_call([sys.executable, "-m", "pip", "install", "xgboost"])
 
-import xgboost as xgb
-
-
-import pandas as pd
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -27,10 +25,13 @@ LABEL_COLUMN = "LABEL"
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--max-iter", type=int, default=50, help="Number of boosting rounds")
-    parser.add_argument("--learning-rate", type=float, default=0.1, help="Learning rate (eta)")
+    parser.add_argument("--max-iter", type=int, default=50,
+                        help="Number of boosting rounds")
+    parser.add_argument("--learning-rate", type=float,
+                        default=0.1, help="Learning rate (eta)")
     parser.add_argument("--max-depth", type=int, default=3, help="Tree depth")
-    parser.add_argument("--random-state", type=int, default=53, help="Random seed")
+    parser.add_argument("--random-state", type=int,
+                        default=53, help="Random seed")
     return parser.parse_args()
 
 
@@ -48,7 +49,8 @@ def _load_split(path: Path) -> Tuple[pd.Series, pd.DataFrame]:
         y = df.iloc[:, 0]
         df = df.iloc[:, 1:]
 
-    feature_df = df.drop(columns=[c for c in NON_FEATURE_COLUMNS if c in df.columns])
+    feature_df = df.drop(
+        columns=[c for c in NON_FEATURE_COLUMNS if c in df.columns])
     return y, feature_df
 
 
@@ -78,11 +80,14 @@ def train_model(train_dir: Path, validation_dir: Path, args: argparse.Namespace)
         except ValueError:
             logger.warning("Validation split is empty; proceeding without it.")
     else:
-        logger.warning("Validation directory %s does not exist; proceeding without it.", validation_dir)
+        logger.warning(
+            "Validation directory %s does not exist; proceeding without it.", validation_dir)
 
-    logger.info("Training dataset: %d rows, %d features", X_train.shape[0], X_train.shape[1])
+    logger.info("Training dataset: %d rows, %d features",
+                X_train.shape[0], X_train.shape[1])
     if len(evals) > 1:
-        logger.info("Validation dataset present; using for evaluation during training.")
+        logger.info(
+            "Validation dataset present; using for evaluation during training.")
 
     booster = xgb.train(
         params=booster_params,
@@ -113,7 +118,8 @@ if __name__ == "__main__":
 
     input_dir = Path(os.environ.get("SM_INPUT_DATA_DIR", "/opt/ml/input/data"))
     model_dir = Path(os.environ.get("SM_MODEL_DIR", "/opt/ml/model"))
-    output_dir = Path(os.environ.get("SM_OUTPUT_DATA_DIR", "/opt/ml/output/data"))
+    output_dir = Path(os.environ.get(
+        "SM_OUTPUT_DATA_DIR", "/opt/ml/output/data"))
 
     train_dir = input_dir / "train"
     validation_dir = input_dir / "validation"

@@ -75,11 +75,13 @@ def main():  # pragma: no cover
 
     try:
         pipeline = get_pipeline_driver(args.module_name, args.kwargs)
-        print("###### Creating/updating a SageMaker Pipeline with the following definition:")
+        print(
+            "###### Creating/updating a SageMaker Pipeline with the following definition:")
         parsed = json.loads(pipeline.definition())
         print(json.dumps(parsed, indent=2, sort_keys=True))
 
-        all_tags = get_pipeline_custom_tags(args.module_name, args.kwargs, tags)
+        all_tags = get_pipeline_custom_tags(
+            args.module_name, args.kwargs, tags)
 
         upsert_response = pipeline.upsert(
             role_arn=args.role_arn, description=args.description, tags=all_tags
@@ -88,15 +90,16 @@ def main():  # pragma: no cover
         print(upsert_response)
 
         execution = pipeline.start()
-        print(f"\n###### Execution started with PipelineExecutionArn: {execution.arn}")
+        print(
+            f"\n###### Execution started with PipelineExecutionArn: {execution.arn}")
 
         print("Waiting for the execution to finish...")
 
-        # Setting the attempts and delay (in seconds) will modify the overall time the pipeline waits. 
+        # Setting the attempts and delay (in seconds) will modify the overall time the pipeline waits.
         # If the execution is taking a longer time, update these parameters to a larger value.
         # Eg: The total wait time is calculated as 60 * 120 = 7200 seconds (2 hours)
         execution.wait(max_attempts=120, delay=60)
-        
+
         print("\n#####Execution completed. Execution step details:")
 
         print(execution.list_steps())
