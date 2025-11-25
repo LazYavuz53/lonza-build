@@ -227,7 +227,7 @@ def get_pipeline(
         },
     )
     step_train = TrainingStep(
-        name="TrainAlleleClassifiers",
+        name="TrainLonzaClinicalMarkerClassifiers",
         step_args=step_args,
     )
 
