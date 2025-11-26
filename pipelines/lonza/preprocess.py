@@ -10,12 +10,11 @@ Clinical biomarker analysis script for SageMaker Processing.
 - Time-course plots for significant markers → saved to /opt/ml/processing/output/
 - ML train/validation dataset built from D2, using significant biomarkers
 """
-from sklearn.model_selection import train_test_split  # <<< NEW
+
+from sklearn.model_selection import train_test_split
 from scipy.stats import ttest_ind
 import numpy as np
 
-import pandas as pd
-import matplotlib.pyplot as plt
 
 import argparse
 import logging
@@ -28,11 +27,18 @@ import subprocess
 import sys
 import os
 
-# <<< NEW: install scikit-learn as well
-subprocess.check_call([
-    sys.executable, "-m", "pip", "install",
-    "matplotlib", "seaborn", "pandas", "scikit-learn"
-])
+
+def ensure_dependencies():
+    """Install required Python packages if missing, then import them globally."""
+    required_packages = ["matplotlib", "seaborn", "pandas", "scikit-learn"]
+    for package in required_packages:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+
+    # Import dependencies dynamically after installation
+    global pd, sns, plt
+    import pandas as pd
+    import seaborn as sns
+    import matplotlib.pyplot as plt
 
 
 plt.rcParams["figure.figsize"] = (6, 4)
@@ -788,4 +794,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    ensure_dependencies()
     main()
