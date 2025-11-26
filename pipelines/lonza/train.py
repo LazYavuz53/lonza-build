@@ -1,6 +1,7 @@
 """Training script that consumes pre-split datasets from preprocess.py outputs."""
+from __future__ import annotations
+
 import pandas as pd
-import xgboost as xgb
 import argparse
 import json
 import logging
@@ -11,8 +12,15 @@ from typing import Tuple
 import subprocess
 import sys
 
-# Install xgboost before importing it
-subprocess.check_call([sys.executable, "-m", "pip", "install", "xgboost"])
+
+def ensure_dependencies():
+    """Install required Python packages if missing, then import them globally."""
+    required_packages = ["xgboost"]
+    for package in required_packages:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+
+    global xgb
+    import xgboost as xgb
 
 
 logging.basicConfig(level=logging.INFO)
@@ -114,6 +122,7 @@ def save_metrics(metrics: dict, output_dir: Path) -> None:
 
 
 if __name__ == "__main__":
+    ensure_dependencies()
     args = parse_args()
 
     input_dir = Path(os.environ.get("SM_INPUT_DATA_DIR", "/opt/ml/input/data"))
