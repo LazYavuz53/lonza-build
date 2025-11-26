@@ -215,7 +215,7 @@ def get_pipeline(
     sklearn_train = SKLearn(
         entry_point="train.py",
         source_dir=BASE_DIR,
-        framework_version="1.2-1",
+        framework_version="0.23-1",
         instance_type=training_instance_type_param,
         instance_count=1,
         base_job_name=f"{base_job_prefix}/sklearn-LonzaClinicalMarker-train",
