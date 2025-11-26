@@ -1,4 +1,4 @@
-from pipelines.InstaDeepMHCIPresentation.pipeline import get_pipeline
+from pipelines.lonza.pipeline import get_pipeline
 import boto3
 import os
 import sys
@@ -12,8 +12,8 @@ def test_pipeline_execution():
     region = boto3.Session().region_name
     role = "arn:aws:iam::975628797022:role/service-role/AmazonSageMaker-ExecutionRole-20250826T095642"
 
-    model_package_group_name = "InstaDeepMHCIPresentationModelPackageGroup"
-    pipeline_name = "InstaDeepMHCIPresentationPipeline"
+    model_package_group_name = "LonzaClinicalMarkerModelPackageGroup"
+    pipeline_name = "LonzaClinicalMarkerPipeline"
 
     pipeline = get_pipeline(
         region=region,
