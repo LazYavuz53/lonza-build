@@ -249,7 +249,7 @@ def get_pipeline(
     script_eval = ScriptProcessor(
         image_uri=sklearn_image_uri,
         command=["python3"],
-        instance_type=processing_instance_type_param,
+        instance_type=processing_instance_type_param.default_value,
         instance_count=1,
         base_job_name=f"{base_job_prefix}/script-LonzaClinicalMarker-eval",
         sagemaker_session=pipeline_session,
