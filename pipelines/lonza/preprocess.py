@@ -29,18 +29,10 @@ import sys
 import os
 
 # <<< NEW: install scikit-learn as well
-subprocess.check_call(
-    [
-        sys.executable,
-        "-m",
-        "pip",
-        "install",
-        "matplotlib",
-        "seaborn",
-        "pandas",
-        "scikit-learn",
-    ]
-)
+subprocess.check_call([
+    sys.executable, "-m", "pip", "install",
+    "matplotlib", "seaborn", "pandas", "scikit-learn"
+])
 
 
 plt.rcParams["figure.figsize"] = (6, 4)
@@ -53,7 +45,7 @@ logging.basicConfig(level=logging.INFO)
 def parse_s3_uri(s3_uri: str) -> Tuple[str, str]:
     """Split an S3 URI into bucket and prefix components."""
     if not s3_uri.startswith("s3://"):
-        raise ValueError(f"Expected S3 URI starting with 's3://', got: {s3_uri}")
+        raise ValueError(f'Expected S3 URI starting with \"s3://\", got: {s3_uri}')
 
     path = s3_uri[5:]
     if "/" not in path:
@@ -66,7 +58,7 @@ def download_s3_prefix(s3_uri: str, local_dir: str) -> None:
     """Download the full contents of an S3 prefix into ``local_dir``."""
     bucket, prefix = parse_s3_uri(s3_uri)
     client = boto3.client("s3")
-    paginator = client.get_paginator("list_objects_v2")
+    paginator = client.get_get_paginator("list_objects_v2")
 
     logger.info("Downloading dataset from %s to %s", s3_uri, local_dir)
     for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
@@ -112,11 +104,7 @@ def three_way_split(
     remaining = shuffled.iloc[test_size:]
 
     if remaining.empty:
-        return (
-            pd.DataFrame(columns=df.columns),
-            pd.DataFrame(columns=df.columns),
-            test,
-        )
+        return pd.DataFrame(columns=df.columns), pd.DataFrame(columns=df.columns), test
 
     train, validation = perform_split(remaining)
     return train, validation, test
@@ -171,7 +159,7 @@ def bh_fdr(pvals: np.ndarray) -> np.ndarray:
     ranked_p = pvals[order]
     q = np.empty(m, dtype=float)
     prev_q = 1.0
-    # Iterate from largest p to smallest
+
     for i in range(m - 1, -1, -1):
         rank = i + 1
         q_i = ranked_p[i] * m / rank
@@ -179,6 +167,7 @@ def bh_fdr(pvals: np.ndarray) -> np.ndarray:
             q_i = prev_q
         prev_q = q_i
         q[i] = q_i
+
     qvals = np.empty(m, dtype=float)
     qvals[order] = q
     return qvals
@@ -188,64 +177,52 @@ def bh_fdr(pvals: np.ndarray) -> np.ndarray:
 # Column validation and cleaning
 # =========================================================
 def validate_and_clean_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Validate required columns exist and clean column names.
-    """
-    # Strip whitespace from column names
+    """Validate required columns exist and clean column names."""
     df.columns = df.columns.str.strip()
 
     print("\n=== Column Validation ===")
     print(f"Available columns: {df.columns.tolist()}")
 
-    # Required columns mapping (case-insensitive check)
     required_cols = {
         "VISIT": ["VISIT", "visit", "Visit", "AVISIT", "AVISITN"],
         "TREATMENT": ["TREATMENT", "treatment", "TRT", "ARM", "ARMCD"],
         "USUBJID": ["USUBJID", "usubjid", "SUBJID", "subject_id", "SUBJECT"],
-        "GENDER": ["GENDER", "gender", "SEX", "sex"],
+        "GENDER": ["GENDER", "gender", "SEX", "sex"]
     }
 
-    # Try to find and standardize each required column
     for std_name, variants in required_cols.items():
         found = False
         for variant in variants:
             if variant in df.columns:
                 if variant != std_name:
-                    print(f"Renaming column '{variant}' to '{std_name}'")
+                    print(f'Renaming column \"{variant}\" to \"{std_name}\"')
                     df = df.rename(columns={variant: std_name})
                 found = True
                 break
 
         if not found:
-            # Check for partial matches
-            partial_matches = [
-                col
-                for col in df.columns
-                if any(v.lower() in col.lower() for v in variants)
-            ]
+            partial_matches = [col for col in df.columns
+                               if any(v.lower() in col.lower() for v in variants)]
             if partial_matches:
                 raise ValueError(
-                    f"Could not find required column '{std_name}'. "
-                    f"Possible matches found: {partial_matches}. "
-                    f"Available columns: {df.columns.tolist()}"
+                    f'Could not find required column \"{std_name}\". '
+                    f"Possible matches: {partial_matches}. "
+                    f"Available: {df.columns.tolist()}"
                 )
             else:
                 raise ValueError(
-                    f"Required column '{std_name}' not found. "
+                    f'Required column \"{std_name}\" not found. '
                     f"Available columns: {df.columns.tolist()}"
                 )
 
-    # Validate VISIT values
     if "VISIT" in df.columns:
         unique_visits = df["VISIT"].unique()
         print(f"\nUnique VISIT values: {unique_visits}")
 
-        # Check if visits need standardization
         visit_mapping = {}
         for visit in unique_visits:
             if pd.notna(visit):
                 visit_str = str(visit).strip().upper()
-                # Handle various formats: D0, Day 0, Day0, 0, etc.
                 if "0" in visit_str or "BASELINE" in visit_str or "BL" in visit_str:
                     visit_mapping[visit] = "D0"
                 elif "1" in visit_str:
@@ -258,30 +235,22 @@ def validate_and_clean_columns(df: pd.DataFrame) -> pd.DataFrame:
             df["VISIT"] = df["VISIT"].map(lambda x: visit_mapping.get(x, x))
             print(f"Standardized VISIT values: {df['VISIT'].unique()}")
 
-    # Validate TREATMENT values
     if "TREATMENT" in df.columns:
         unique_treatments = df["TREATMENT"].unique()
         print(f"\nUnique TREATMENT values: {unique_treatments}")
 
-        # Standardize treatment names
         treatment_mapping = {}
         for trt in unique_treatments:
             if pd.notna(trt):
                 trt_str = str(trt).strip().upper()
                 if "DRUG" in trt_str or "ACTIVE" in trt_str or "TRT" in trt_str:
                     treatment_mapping[trt] = "DRUG"
-                elif (
-                    "PLACEBO" in trt_str
-                    or "PBO" in trt_str
-                    or "CONTROL" in trt_str
-                ):
+                elif "PLACEBO" in trt_str or "PBO" in trt_str or "CONTROL" in trt_str:
                     treatment_mapping[trt] = "PLACEBO"
 
         if treatment_mapping:
             print(f"Applying treatment mapping: {treatment_mapping}")
-            df["TREATMENT"] = df["TREATMENT"].map(
-                lambda x: treatment_mapping.get(x, x)
-            )
+            df["TREATMENT"] = df["TREATMENT"].map(lambda x: treatment_mapping.get(x, x))
             print(f"Standardized TREATMENT values: {df['TREATMENT'].unique()}")
 
     return df
@@ -292,8 +261,6 @@ def validate_and_clean_columns(df: pd.DataFrame) -> pd.DataFrame:
 # =========================================================
 def load_data(csv_path: Path) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
-
-    # Validate and clean columns first
     df = validate_and_clean_columns(df)
 
     marker_cols = [c for c in df.columns if c.startswith("MARKER_")]
@@ -328,7 +295,6 @@ def descriptive_stats(df: pd.DataFrame) -> None:
 def qc_missingness(df: pd.DataFrame) -> pd.DataFrame:
     marker_cols = [c for c in df.columns if c.startswith("MARKER_")]
 
-    # Row-level QC flag: any marker missing => measurement invalid at that timepoint
     df = df.copy()
     df["ROW_HAS_MISSING_MARKER"] = df[marker_cols].isna().any(axis=1)
 
@@ -362,7 +328,6 @@ def qc_missingness(df: pd.DataFrame) -> pd.DataFrame:
         )
     )
 
-    # Analysis dataset: drop rows with missing marker
     analysis_df = df[~df["ROW_HAS_MISSING_MARKER"]].copy()
 
     print("\n=== Analysis dataset size ===")
@@ -391,11 +356,10 @@ def compute_cfb(analysis_df: pd.DataFrame) -> pd.DataFrame:
         values=marker_cols,
     )
 
-    # Collect all new CFB columns in a list for concat
     cfb_frames = []
 
     for m in marker_cols:
-        if "D0" not in pivot[m]:
+        if "D0"not in pivot[m]:
             continue
         baseline = pivot[m]["D0"]
 
@@ -410,13 +374,10 @@ def compute_cfb(analysis_df: pd.DataFrame) -> pd.DataFrame:
         sub_meta = analysis_df[["USUBJID", "TREATMENT", "GENDER"]].drop_duplicates()
         return sub_meta
 
-    # Concatenate all at once → avoids fragmentation
     cfb_wide = pd.concat(cfb_frames, axis=1)
 
-    # Flatten multiindex columns
     cfb_wide.columns = [f"{col[0]}_{col[1]}" for col in cfb_wide.columns]
 
-    # Merge with subject metadata
     sub_meta = analysis_df[["USUBJID", "TREATMENT", "GENDER"]].drop_duplicates()
     cfb_df = sub_meta.merge(cfb_wide, on="USUBJID", how="left")
 
@@ -431,7 +392,6 @@ def differential_analysis_d2(analysis_df: pd.DataFrame) -> pd.DataFrame:
     """
     marker_cols = [c for c in analysis_df.columns if c.startswith("MARKER_")]
 
-    # Verify VISIT column exists (should be in long format)
     if "VISIT" not in analysis_df.columns:
         raise ValueError(
             f"VISIT column not found in analysis dataframe. "
@@ -439,14 +399,13 @@ def differential_analysis_d2(analysis_df: pd.DataFrame) -> pd.DataFrame:
             f"Available columns: {analysis_df.columns.tolist()}"
         )
 
-    # Filter to D2 only
     d2 = analysis_df[analysis_df["VISIT"] == "D2"].copy()
 
     print("\n=== D2 subset info (analysis dataset) ===")
     print("D2 rows:", len(d2))
 
     if len(d2) == 0:
-        print("WARNING: No rows found for VISIT='D2'")
+        print('WARNING: No rows found for VISIT=\"D2\"')
         print(f"Available VISIT values: {analysis_df['VISIT'].unique()}")
         return pd.DataFrame(columns=["marker", "p_value", "q_value"])
 
@@ -462,7 +421,6 @@ def differential_analysis_d2(analysis_df: pd.DataFrame) -> pd.DataFrame:
     for m in marker_cols:
         vals_drug = d2.loc[drug_mask, m].dropna()
         vals_plac = d2.loc[plac_mask, m].dropna()
-        # Require a minimum size to avoid silly tests
         if len(vals_drug) >= 3 and len(vals_plac) >= 3:
             stat, p = ttest_ind(vals_drug, vals_plac, equal_var=False)
             pvals.append(p)
@@ -489,7 +447,6 @@ def differential_analysis_d2(analysis_df: pd.DataFrame) -> pd.DataFrame:
     print("\nTop 10 markers by q-value:")
     print(stats_df.head(10))
 
-    # Significant markers at FDR <= 1%
     sig_df = stats_df[stats_df["q_value"] <= 0.01].copy()
     print("\nSignificant markers at FDR <= 1%:")
     print(sig_df)
@@ -512,7 +469,7 @@ def build_ml_dataset(
     """
     Build ML-ready dataset at D2:
       - choose significant markers (FDR <= threshold, else top 3),
-      - restrict to VISIT=='D2',
+      - restrict to VISIT=="D2",
       - drop rows with missing values in those markers,
       - add binary LABEL (1=DRUG, 0=PLACEBO).
     Returns (ml_df, sig_markers).
@@ -521,7 +478,6 @@ def build_ml_dataset(
         print("\nWARNING: stats_df is empty; cannot build ML dataset.")
         return pd.DataFrame(), []
 
-    # choose markers
     sig_df = stats_df[stats_df["q_value"] <= fdr_threshold].copy()
     if len(sig_df) > 0:
         sig_markers = sig_df["marker"].tolist()
@@ -537,36 +493,29 @@ def build_ml_dataset(
 
     d2 = analysis_df[analysis_df["VISIT"] == "D2"].copy()
     if d2.empty:
-        print("\nWARNING: No VISIT == 'D2' rows; cannot build ML dataset.")
+        print('\nWARNING: No VISIT == "D2" rows; cannot build ML dataset.')
         return pd.DataFrame(), sig_markers
 
-    # drop rows with any missing in sig_markers
     d2_ml = d2.dropna(subset=sig_markers).copy()
     if d2_ml.empty:
         print("\nWARNING: After dropping NA for significant markers, no rows left.")
         return pd.DataFrame(), sig_markers
 
-    # build label: 1=DRUG, 0=PLACEBO
     y = (d2_ml["TREATMENT"] == "DRUG").astype(int).values
 
     print("\n=== ML dataset (D2, selected markers) ===")
-    print("Number of rows:", d2_ml.shape[0])
-    print("Number of features:", len(sig_markers))
+    print("Rows:", d2_ml.shape[0])
+    print("Features:", len(sig_markers))
     unique, counts = np.unique(y, return_counts=True)
-    print("Class balance (0=PLACEBO, 1=DRUG):")
-    print(dict(zip(unique, counts)))
+    print("Class balance:", dict(zip(unique, counts)))
 
-    # Same sanity check as in your notebook
     if len(np.unique(y)) < 2 or d2_ml.shape[0] < 6:
-        print(
-            "\nNot enough data to train a meaningful ML model; returning empty ML dataset."
-        )
+        print("\nNot enough data to train ML model; returning empty.")
         return pd.DataFrame(), sig_markers
 
     d2_ml = d2_ml.copy()
-    d2_ml["LABEL"] = y  # binary target
+    d2_ml["LABEL"] = y
 
-    # Order columns: meta, features, label
     base_cols = [c for c in ["USUBJID", "TREATMENT", "GENDER"] if c in d2_ml.columns]
     ordered_cols = base_cols + sig_markers + ["LABEL"]
     d2_ml = d2_ml[ordered_cols]
@@ -585,14 +534,12 @@ def plot_time_courses(
         print("\nNo stats available to plot.")
         return
 
-    # Decide which markers to plot
     sig_df = stats_df[stats_df["q_value"] <= fdr_threshold].copy()
     if len(sig_df) > 0:
         sig_markers = sig_df["marker"].tolist()
     else:
         sig_markers = stats_df.head(3)["marker"].tolist()
 
-    # helper lookup dicts for p/q values
     pval_lookup = dict(zip(stats_df["marker"], stats_df["p_value"]))
 
     if save_dir is not None:
@@ -601,7 +548,6 @@ def plot_time_courses(
     for m in sig_markers:
         plt.figure()
 
-        # We'll use numeric x positions to make annotation easier
         visits_order = ["D0", "D1", "D2"]
         x_labels = [v for v in visits_order if v in analysis_df["VISIT"].unique()]
         x = np.arange(len(x_labels))
@@ -609,27 +555,22 @@ def plot_time_courses(
         for treatment in ["DRUG", "PLACEBO"]:
             sub = analysis_df[analysis_df["TREATMENT"] == treatment]
             means = sub.groupby("VISIT")[m].mean()
-
-            # guard in case some visits are missing
             y_vals = [means.loc[v] if v in means.index else np.nan for v in x_labels]
             plt.plot(x, y_vals, marker="o", label=treatment)
 
-        # axis labels/ticks
         plt.xlabel("VISIT")
         plt.ylabel(m)
         plt.title(f"Mean {m} over time by TREATMENT")
         plt.xticks(x, x_labels)
         plt.legend()
 
-        # === Add p-value annotation at D2 if present ===
         p = pval_lookup.get(m, None)
 
-        # Only show something if p <= 0.01
         if p is not None and p <= 0.01:
             ax = plt.gca()
             ax.text(
                 0.65,
-                0.98,  # near top-right
+                0.98,
                 "Significant (p ≤ 0.01)",
                 transform=ax.transAxes,
                 ha="left",
@@ -637,12 +578,12 @@ def plot_time_courses(
                 fontsize=8,
                 fontweight="bold",
                 color="red",
-                bbox={
-                    "boxstyle": "round,pad=0.1",
-                    "fc": "white",
-                    "ec": "black",
-                    "alpha": 0.8,
-                },
+                bbox=dict(
+                    boxstyle="round,pad=0.1",
+                    fc="white",
+                    ec="black",
+                    alpha=0.8,
+                ),
             )
 
         plt.tight_layout()
@@ -666,13 +607,11 @@ def download_from_s3(s3_uri: str, destination: Path) -> Path:
     prefix = parsed.path.lstrip("/")
     s3 = boto3.client("s3")
 
-    # list all objects under the prefix
     resp = s3.list_objects_v2(Bucket=bucket, Prefix=prefix)
 
     if "Contents" not in resp:
         raise FileNotFoundError(f"No objects found at {s3_uri}")
 
-    # find the first CSV
     csv_keys = [obj["Key"] for obj in resp["Contents"] if obj["Key"].endswith(".csv")]
     if not csv_keys:
         raise FileNotFoundError(f"No CSV files found under {s3_uri}")
@@ -691,22 +630,13 @@ def stratified_train_val_test(
     test_fraction: float = 0.2,
     val_fraction: float = 0.2,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Create stratified train/validation/test splits when possible.
-
-    * ``test_fraction`` is applied to the full dataset.
-    * ``val_fraction`` is applied to the remaining portion (train+val).
-    * Guarantees at least one row in test/validation when the input has
-      enough rows; falls back to unstratified splitting when stratification
-      is impossible (e.g., single-class labels or very small datasets).
-    """
-
+    """Create stratified train/validation/test splits when possible."""
     if df.empty:
         return df.copy(), df.copy(), df.copy()
 
     n_rows = len(df)
-    stratify_labels: Optional[pd.Series]
 
-    # Determine whether stratification is feasible
+    stratify_labels: Optional[pd.Series]
     if df[label_col].nunique() > 1 and n_rows >= 4:
         stratify_labels = df[label_col]
     else:
@@ -718,8 +648,6 @@ def stratified_train_val_test(
             n_rows,
         )
 
-    # Compute test size with an integer floor of the fraction but ensure at least 1 and
-    # leave room for train/validation
     test_size = max(1, int(test_fraction * n_rows))
     if test_size >= n_rows:
         test_size = n_rows - 1
@@ -732,23 +660,14 @@ def stratified_train_val_test(
     )
 
     if train_val.empty:
-        return (
-            pd.DataFrame(columns=df.columns),
-            pd.DataFrame(columns=df.columns),
-            test.reset_index(drop=True),
-        )
+        return pd.DataFrame(columns=df.columns), pd.DataFrame(columns=df.columns), test.reset_index(drop=True)
 
-    # Validation fraction is applied to the remaining train/val pool
     val_size = max(1, int(val_fraction * len(train_val)))
     if val_size >= len(train_val):
         val_size = len(train_val) - 1
 
     val_stratify: Optional[pd.Series]
-    if (
-        stratify_labels is not None
-        and train_val[label_col].nunique() > 1
-        and len(train_val) >= 3
-    ):
+    if stratify_labels is not None and train_val[label_col].nunique() > 1 and len(train_val) >= 3:
         val_stratify = train_val[label_col]
     else:
         val_stratify = None
@@ -809,37 +728,28 @@ def main() -> None:
     else:
         csv_path = Path(csv_arg)
 
-    # Always use output directory for plots inside processing output
     save_plots_dir = plots_dir
 
-    # 1. Load data (includes column validation)
     df = load_data(csv_path)
 
-    # 2. Descriptive stats
     descriptive_stats(df)
 
-    # 3. Missingness & QC
     analysis_df = qc_missingness(df)
 
-    # 4. Compute CFB (creates wide-format, per-subject)
     cfb_df = compute_cfb(analysis_df)
     print("\n=== CFB dataframe shape ===")
     print(cfb_df.shape)
 
-    # Optionally save full CFB-wide dataset for reference
     cfb_dir = output_base_dir / "cfb"
     cfb_dir.mkdir(parents=True, exist_ok=True)
     save_dataframe(cfb_df, cfb_dir / "cfb.csv")
     logger.info("CFB-wide dataset saved to %s", cfb_dir / "cfb.csv")
 
-    # 5. Differential analysis at D2 (LONG format)
     stats_df = differential_analysis_d2(analysis_df)
 
-    # 6. Build ML-ready dataset at D2 using significant markers
     ml_df, sig_markers = build_ml_dataset(analysis_df, stats_df)
 
     if ml_df.empty:
-        # Fallback to previous behaviour: 3-way split on CFB data
         logger.warning(
             "ML dataset is empty or insufficient; falling back to CFB-based three-way split."
         )
@@ -850,18 +760,17 @@ def main() -> None:
             ml_df,
             label_col="LABEL",
             test_fraction=0.2,
-            val_fraction=0.25,  # 20% test; 25% of remaining ≈ 20% validation
+            val_fraction=0.25,
         )
         cleaned_full = ml_df
 
     logger.info(
-        "Final ML splits: %d train rows, %d validation rows, %d test rows",
+        "Final ML splits: %d train, %d validation, %d test",
         len(train_df),
         len(validation_df),
         len(test_df),
     )
 
-    # 7. Save train/validation/test and full cleaned ML dataset
     prepare_outputs(
         train=train_df,
         validation=validation_df,
@@ -870,7 +779,6 @@ def main() -> None:
         cleaned_full=cleaned_full,
     )
 
-    # 8. Time-course plots → saved to output directory
     plot_time_courses(
         analysis_df,
         stats_df,
