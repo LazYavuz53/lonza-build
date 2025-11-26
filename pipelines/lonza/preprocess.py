@@ -40,9 +40,9 @@ def ensure_dependencies():
     import seaborn as sns
     import matplotlib.pyplot as plt
 
+    plt.rcParams["figure.figsize"] = (6, 4)
+    plt.rcParams["figure.dpi"] = 120
 
-plt.rcParams["figure.figsize"] = (6, 4)
-plt.rcParams["figure.dpi"] = 120
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
