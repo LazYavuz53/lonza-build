@@ -172,15 +172,6 @@ def get_pipeline(
         default_value="s3://instadeep53/datasets/clinical.csv",
     )
 
-    # processing step for feature engineering
-    processing_image_uri = image_uris.retrieve(
-        framework="sklearn",
-        region=region,
-        version="0.23-1",
-        py_version="py3",
-        instance_type=processing_instance_type_param.default_value,
-    )
-
     sklearn_processor = SKLearnProcessor(
         framework_version="0.23-1",
         instance_type=processing_instance_type_param,
@@ -188,7 +179,6 @@ def get_pipeline(
         base_job_name=f"{base_job_prefix}/sklearn-LonzaClinicalMarker-preprocess",
         sagemaker_session=pipeline_session,
         role=role,
-        image_uri=processing_image_uri,
     )
     step_args = sklearn_processor.run(
         outputs=[
