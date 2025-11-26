@@ -207,7 +207,7 @@ def get_pipeline(
     training_image_uri = image_uris.retrieve(
         framework="sklearn",
         region=region,
-        version="1.2-1",
+        version="0.23-1",
         py_version="py3",
         instance_type=training_instance_type_param.default_value,
     )
