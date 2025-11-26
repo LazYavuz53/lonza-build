@@ -14,6 +14,7 @@ import os
 import boto3
 import sagemaker
 import sagemaker.session
+from sagemaker import image_uris
 
 from sagemaker.inputs import TrainingInput
 from sagemaker.model_metrics import (
@@ -172,6 +173,14 @@ def get_pipeline(
     )
 
     # processing step for feature engineering
+    processing_image_uri = image_uris.retrieve(
+        framework="sklearn",
+        region=region,
+        version="0.23-1",
+        py_version="py3",
+        instance_type=processing_instance_type_param.default_value,
+    )
+
     sklearn_processor = SKLearnProcessor(
         framework_version="0.23-1",
         instance_type=processing_instance_type_param,
@@ -179,6 +188,7 @@ def get_pipeline(
         base_job_name=f"{base_job_prefix}/sklearn-LonzaClinicalMarker-preprocess",
         sagemaker_session=pipeline_session,
         role=role,
+        image_uri=processing_image_uri,
     )
     step_args = sklearn_processor.run(
         outputs=[
@@ -204,6 +214,14 @@ def get_pipeline(
     )
 
     # training step for generating model artifacts
+    training_image_uri = image_uris.retrieve(
+        framework="sklearn",
+        region=region,
+        version="1.2-1",
+        py_version="py3",
+        instance_type=training_instance_type_param.default_value,
+    )
+
     sklearn_train = SKLearn(
         entry_point="train.py",
         source_dir=BASE_DIR,
@@ -213,6 +231,7 @@ def get_pipeline(
         base_job_name=f"{base_job_prefix}/sklearn-LonzaClinicalMarker-train",
         sagemaker_session=pipeline_session,
         role=role,
+        image_uri=training_image_uri,
     )
     step_args = sklearn_train.fit(
         inputs={
@@ -236,7 +255,7 @@ def get_pipeline(
     )
 
     # processing step for evaluation
-    sklearn_image_uri = sklearn_train.training_image_uri()
+    sklearn_image_uri = training_image_uri
     script_eval = ScriptProcessor(
         image_uri=sklearn_image_uri,
         command=["python3"],
