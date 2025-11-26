@@ -259,7 +259,8 @@ This occurs because the drug induces large, consistent biomarker shifts at D2, w
 ### 🔬 Biomarker Modulation
 The significant D2 biomarkers belong to pathways involved in:
 
-- T-cell activation  
+- T-cell activation 
+ 
 - Immune signalling  
 - Transcription factors (e.g., NF-κB, TP53 families)
 
