@@ -33,12 +33,7 @@
     └── outputs/
 ```
 
-# MHCI Presentation Project
 
-##  Getting Started
- 
-This guide will help you set up your environment and contribute effectively to the **MHCI Presentation** repository.  
-Please follow the steps carefully to prepare your environment and align with our software and project management best practices.
 
 ---
 
